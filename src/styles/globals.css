@@ -1,0 +1,115 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Base ────────────────────────────────────────────────────────────────────── */
+* {
+  box-sizing: border-box;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  color: #c8e6f0;
+  user-select: none;
+}
+
+/* ── Scrollbar ───────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #0d2137; border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #00d4ff44; }
+
+/* ── Selection ───────────────────────────────────────────────────────────────── */
+::selection { background: #00d4ff33; color: #00d4ff; }
+
+/* ── JARVIS glow utilities ───────────────────────────────────────────────────── */
+@layer utilities {
+  .glow-text {
+    text-shadow: 0 0 8px currentColor, 0 0 20px currentColor;
+  }
+
+  .glow-border {
+    box-shadow: 0 0 12px #00d4ff22, inset 0 0 12px #00d4ff08;
+  }
+
+  .glow-border-strong {
+    box-shadow: 0 0 20px #00d4ff44, 0 0 60px #00d4ff11, inset 0 0 20px #00d4ff0a;
+  }
+
+  .scanline::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+      to bottom,
+      transparent 0px,
+      transparent 2px,
+      rgba(0, 212, 255, 0.015) 2px,
+      rgba(0, 212, 255, 0.015) 4px
+    );
+    pointer-events: none;
+  }
+
+  .hud-panel {
+    background: linear-gradient(135deg, #0a1628ee, #050c14ee);
+    border: 1px solid #0d2137;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  .hud-panel-active {
+    border-color: #00d4ff44;
+    box-shadow: 0 0 20px #00d4ff22, inset 0 0 20px #00d4ff08;
+  }
+}
+
+/* ── Animations ──────────────────────────────────────────────────────────────── */
+@keyframes hud-enter {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0)   scale(1);    }
+}
+
+@keyframes blink-cursor {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+@keyframes waveform-bar {
+  0%, 100% { transform: scaleY(0.3); }
+  50%       { transform: scaleY(1.0); }
+}
+
+@keyframes ring-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes ring-spin-reverse {
+  from { transform: rotate(360deg); }
+  to   { transform: rotate(0deg); }
+}
+
+.animate-hud-enter   { animation: hud-enter 0.3s ease-out forwards; }
+.animate-cursor      { animation: blink-cursor 1s step-end infinite; }
+.animate-ring-1      { animation: ring-spin 8s linear infinite; }
+.animate-ring-2      { animation: ring-spin-reverse 12s linear infinite; }
+
+/* ── Typewriter cursor for streaming text ────────────────────────────────────── */
+.streaming-text::after {
+  content: '▊';
+  display: inline-block;
+  animation: blink-cursor 0.8s step-end infinite;
+  color: #00d4ff;
+  margin-left: 2px;
+  font-size: 0.85em;
+}
