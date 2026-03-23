@@ -1,13 +1,18 @@
 import { motion } from 'framer-motion'
 import { Minus, Square, X, Cpu } from 'lucide-react'
 import { useJarvisStore } from '@/store/jarvis'
+import { getReactorDisplayStatus } from '@/lib/reactor-display'
 
 export function TitleBar() {
   const ocStatus = useJarvisStore((s) => s.ocStatus)
+  const statusChecked = useJarvisStore((s) => s.statusChecked)
+  const reactorVisualLive = useJarvisStore((s) => s.reactorVisualLive)
 
   const handleMinimize = () => window.jarvis?.window.minimize()
   const handleMaximize = () => window.jarvis?.window.maximize()
   const handleClose    = () => window.jarvis?.window.close()
+
+  const displayStatus = getReactorDisplayStatus({ reactorVisualLive, statusChecked, ocStatus })
 
   return (
     <div
@@ -32,14 +37,12 @@ export function TitleBar() {
       <div className="flex items-center gap-2">
         <motion.div
           className="w-1.5 h-1.5 rounded-full"
-          style={{ background: ocStatus.online ? '#00ff88' : '#ff6b35' }}
+          style={{ background: displayStatus.color }}
           animate={{ opacity: [0.6, 1, 0.6] }}
           transition={{ duration: 2, repeat: Infinity }}
         />
         <span className="text-[10px] font-mono text-jarvis-muted">
-          {ocStatus.online
-            ? `OPENCLAW ${ocStatus.model ? `· ${ocStatus.model}` : 'ONLINE'}`
-            : 'OPENCLAW OFFLINE'}
+          {displayStatus.titleText}
         </span>
       </div>
 

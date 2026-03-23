@@ -9,8 +9,8 @@ export default defineConfig({
       outDir: 'dist-electron',
       emptyOutDir: false,
       rollupOptions: {
-        input: resolve(__dirname, 'electron/main.ts'),
-        output: { entryFileNames: 'main.js' }
+        input:  resolve(__dirname, 'electron/main.ts'),
+        output: { entryFileNames: 'main.js', format: 'cjs' }
       }
     }
   },
@@ -20,13 +20,17 @@ export default defineConfig({
       outDir: 'dist-electron',
       emptyOutDir: false,
       rollupOptions: {
-        input: resolve(__dirname, 'electron/preload.ts'),
-        output: { entryFileNames: 'preload.js' }
+        input:  resolve(__dirname, 'electron/preload.ts'),
+        output: { entryFileNames: 'preload.js', format: 'cjs' }
       }
     }
   },
   renderer: {
     root: '.',
+    server: {
+      port: 5173,
+      strictPort: true,
+    },
     build: {
       outDir: 'dist',
       rollupOptions: {

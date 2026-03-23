@@ -1,93 +1,116 @@
-import { useEffect } from 'react'
-import { motion } from 'framer-motion'
+import { useEffect, useState } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
 import { useJarvisStore } from '@/store/jarvis'
-import { TitleBar }   from '@/components/hud/TitleBar'
 import { Background } from '@/components/hud/Background'
-import { CentralRing } from '@/components/hud/CentralRing'
-import { LeftPanel }  from '@/components/panels/LeftPanel'
-import { RightPanel } from '@/components/panels/RightPanel'
-import { MessageList } from '@/components/chat/MessageList'
-import { InputBar }    from '@/components/chat/InputBar'
+import { BootOverlay } from '@/components/hud/BootOverlay'
+import { TitleBar } from '@/components/hud/TitleBar'
+import { TabShell } from '@/components/tabs/TabShell'
+import { getReactorDisplayStatus } from '@/lib/reactor-display'
 
 export default function App() {
   const setOcStatus = useJarvisStore((s) => s.setOcStatus)
-  const pushLog     = useJarvisStore((s) => s.pushLog)
-  const config      = useJarvisStore((s) => s.config)
+  const setReactorVisualLive = useJarvisStore((s) => s.setReactorVisualLive)
+  const pushLog = useJarvisStore((s) => s.pushLog)
+  const ocStatus = useJarvisStore((s) => s.ocStatus)
+  const statusChecked = useJarvisStore((s) => s.statusChecked)
+  const reactorVisualLive = useJarvisStore((s) => s.reactorVisualLive)
+  const [booted, setBooted] = useState(false)
 
-  // Poll OpenClaw gateway status
   useEffect(() => {
+    if (booted) {
+      setReactorVisualLive(true)
+    }
+  }, [booted, setReactorVisualLive])
+
+  useEffect(() => {
+    if (!booted) return
+
     const check = async () => {
       if (!window.jarvis) {
-        // Running in browser (dev without Electron) — show as offline
-        setOcStatus({ online: false, error: 'Electron not available' })
+        setOcStatus({ online: false, error: 'No bridge' })
         return
       }
+
       const status = await window.jarvis.openclaw.status()
       setOcStatus(status)
-      if (!status.online) pushLog(`OpenClaw unreachable: ${status.error ?? 'timeout'}`)
+      if (status.online) pushLog(`Gateway online · ${status.model ?? 'connected'}`, 'success')
+      else pushLog(`Gateway unreachable: ${status.error}`, 'error')
     }
+
     check()
-    const interval = setInterval(check, 15_000)
-    return () => clearInterval(interval)
-  }, [setOcStatus, pushLog])
+    const id = setInterval(check, 20_000)
+    return () => clearInterval(id)
+  }, [booted, pushLog, setOcStatus])
 
   return (
-    <div
-      className="relative flex flex-col h-screen overflow-hidden scanline"
-      style={{ background: `rgba(5,12,20,${config.theme.opacity})` }}
-    >
-      {/* Animated background canvas */}
+    <div className="relative flex h-screen flex-col overflow-hidden" style={{ background: '#0a0a0f' }}>
       <Background />
 
-      {/* Main layout */}
-      <div className="relative z-10 flex flex-col h-full">
-        {/* Titlebar */}
-        <TitleBar />
+      <AnimatePresence>
+        {!booted && <BootOverlay onComplete={() => setBooted(true)} />}
+      </AnimatePresence>
 
-        {/* Body */}
-        <div className="flex flex-1 min-h-0">
-          {/* Left panel */}
-          <LeftPanel />
-
-          {/* Center: chat */}
+      <AnimatePresence>
+        {booted && (
           <motion.div
-            className="flex flex-col flex-1 min-w-0"
+            className="relative z-10 flex h-full flex-col"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            transition={{ delay: 0.1 }}
+            transition={{ duration: 0.45, ease: 'easeOut' }}
           >
-            {/* HUD ring (top of center) */}
-            <CentralRing />
-
-            {/* Message stream */}
-            <MessageList />
-
-            {/* Input */}
-            <InputBar />
+            <TitleBar />
+            <TabShell />
+            <StatusBar
+              reactorVisualLive={reactorVisualLive}
+              statusChecked={statusChecked}
+              online={ocStatus.online}
+              model={ocStatus.model}
+              error={ocStatus.error}
+            />
           </motion.div>
-
-          {/* Right panel */}
-          <RightPanel />
-        </div>
-
-        {/* Bottom status bar */}
-        <StatusBar />
-      </div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }
 
-function StatusBar() {
-  const msgs     = useJarvisStore((s) => s.messages)
-  const ocStatus = useJarvisStore((s) => s.ocStatus)
+function StatusBar({
+  reactorVisualLive,
+  statusChecked,
+  online,
+  model,
+  error,
+}: {
+  reactorVisualLive: boolean
+  statusChecked: boolean
+  online: boolean
+  model?: string
+  error?: string
+}) {
+  const displayStatus = getReactorDisplayStatus({
+    reactorVisualLive,
+    statusChecked,
+    ocStatus: { online, model, error },
+  })
+  const color = reactorVisualLive ? 'rgba(0,255,136,0.58)' : 'rgba(255,154,84,0.68)'
+  const text = displayStatus.footerText
 
   return (
-    <div className="h-5 flex items-center px-3 border-t border-jarvis-border gap-4">
-      <span className="text-[9px] font-mono text-jarvis-muted">
-        {msgs.length} message{msgs.length !== 1 ? 's' : ''}
+    <div
+      className="flex h-6 items-center gap-4 px-4 flex-shrink-0"
+      style={{
+        borderTop: '1px solid rgba(0,212,255,0.08)',
+        background: 'rgba(2,8,14,0.56)',
+      }}
+    >
+      <span className="text-[9px] font-mono tracking-[0.14em]" style={{ color: 'rgba(74,122,138,0.62)' }}>
+        JARVIS LOCAL SHELL
       </span>
-      <span className="text-[9px] font-mono text-jarvis-muted ml-auto">
-        {ocStatus.online ? `model: ${ocStatus.model ?? 'connected'}` : 'gateway offline'}
+      <span className="text-[9px] font-mono" style={{ color: 'rgba(74,122,138,0.46)' }}>
+        bounded local controls
+      </span>
+      <span className="ml-auto text-[9px] font-mono" style={{ color }}>
+        {text}
       </span>
     </div>
   )

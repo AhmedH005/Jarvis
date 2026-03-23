@@ -6,8 +6,8 @@ export default {
     extend: {
       colors: {
         jarvis: {
-          bg:        '#050c14',
-          surface:   '#0a1628',
+          bg:        '#0a0a0f',   /* Stark exact */
+          surface:   '#0d1520',
           border:    '#0d2137',
           primary:   '#00d4ff',
           secondary: '#0066cc',

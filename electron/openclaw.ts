@@ -1,16 +1,13 @@
-/**
- * OpenClawBridge — communicates with the OpenClaw local gateway.
- *
- * OpenClaw gateway: http://localhost:18789
- * Auth: Bearer token in Authorization header
- *
- * This module lives in the Electron main process so the auth token
- * is never exposed to the renderer process.
- */
+import { app } from 'electron'
+import crypto from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
+import WebSocket, { type RawData } from 'ws'
 
 export interface OpenClawConfig {
   baseUrl: string
   token: string
+  model?: string
 }
 
 export interface OpenClawStatus {
@@ -26,170 +23,761 @@ export interface OpenClawSkill {
   description?: string
 }
 
-export interface StreamChunk {
-  type: 'text' | 'tool_start' | 'tool_end' | 'error'
-  content: string
-  toolName?: string
-  toolInput?: unknown
-  toolOutput?: unknown
+export interface StreamEvent {
+  type: 'start' | 'token' | 'end' | 'error' | 'log'
+  payload: string
+  meta?: {
+    toolName?: string
+    toolInput?: unknown
+    toolOutput?: unknown
+    isToolStart?: boolean
+    isToolEnd?: boolean
+  }
 }
+
+interface DeviceIdentity {
+  deviceId: string
+  publicKeyPem: string
+  privateKeyPem: string
+}
+
+interface GatewayAuthContext {
+  identity: DeviceIdentity
+  token: string
+  role: string
+  scopes: string[]
+  clientId: string
+  clientMode: string
+  displayName: string
+  devicePlatform: string
+  deviceFamily?: string
+}
+
+interface GatewayFrame {
+  type?: string
+  id?: string
+  ok?: boolean
+  event?: string
+  payload?: unknown
+  error?: {
+    message?: string
+  }
+}
+
+const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex')
 
 export class OpenClawBridge {
   private config: OpenClawConfig
 
   constructor(config: OpenClawConfig) {
-    this.config = config
+    this.config = { model: 'openai-codex/gpt-5.4', ...config }
   }
 
-  private headers(): Record<string, string> {
+  private headers(extra?: Record<string, string>): Record<string, string> {
     return {
+      Authorization: `Bearer ${this.config.token}`,
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${this.config.token}`,
+      ...extra,
     }
+  }
+
+  private get healthUrl(): string {
+    const url = new URL(this.config.baseUrl)
+    if (url.hostname === 'localhost') url.hostname = '127.0.0.1'
+    url.pathname = '/health'
+    url.search = ''
+    url.hash = ''
+    return url.toString()
+  }
+
+  private get wsUrl(): string {
+    const url = new URL(this.config.baseUrl)
+    if (url.hostname === 'localhost') url.hostname = '127.0.0.1'
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    url.pathname = ''
+    url.search = ''
+    url.hash = ''
+    return url.toString().replace(/\/$/, '')
+  }
+
+  private get identityPath(): string {
+    return path.join(app.getPath('userData'), 'openclaw-device.json')
+  }
+
+  private get openClawHome(): string {
+    return path.join(app.getPath('home'), '.openclaw')
+  }
+
+  private ensureDir(filePath: string): void {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  }
+
+  private base64UrlEncode(buf: Buffer | Uint8Array): string {
+    return Buffer.from(buf)
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/g, '')
+  }
+
+  private derivePublicKeyRaw(publicKeyPem: string): Buffer {
+    const spki = crypto.createPublicKey(publicKeyPem).export({
+      type: 'spki',
+      format: 'der',
+    })
+
+    if (
+      spki.length === ED25519_SPKI_PREFIX.length + 32 &&
+      spki.subarray(0, ED25519_SPKI_PREFIX.length).equals(ED25519_SPKI_PREFIX)
+    ) {
+      return spki.subarray(ED25519_SPKI_PREFIX.length)
+    }
+
+    return spki
+  }
+
+  private fingerprintPublicKey(publicKeyPem: string): string {
+    return crypto.createHash('sha256').update(this.derivePublicKeyRaw(publicKeyPem)).digest('hex')
+  }
+
+  private generateIdentity(): DeviceIdentity {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519')
+
+    const publicKeyPem = publicKey.export({
+      type: 'spki',
+      format: 'pem',
+    }).toString()
+
+    const privateKeyPem = privateKey.export({
+      type: 'pkcs8',
+      format: 'pem',
+    }).toString()
+
+    return {
+      deviceId: this.fingerprintPublicKey(publicKeyPem),
+      publicKeyPem,
+      privateKeyPem,
+    }
+  }
+
+  private loadOrCreateDeviceIdentity(): DeviceIdentity {
+    try {
+      if (fs.existsSync(this.identityPath)) {
+        const raw = fs.readFileSync(this.identityPath, 'utf8')
+        const parsed = JSON.parse(raw) as Partial<DeviceIdentity> & { version?: number }
+        if (
+          parsed?.version === 1 &&
+          typeof parsed.deviceId === 'string' &&
+          typeof parsed.publicKeyPem === 'string' &&
+          typeof parsed.privateKeyPem === 'string'
+        ) {
+          const derivedId = this.fingerprintPublicKey(parsed.publicKeyPem)
+          if (derivedId !== parsed.deviceId) {
+            const updated = {
+              version: 1,
+              deviceId: derivedId,
+              publicKeyPem: parsed.publicKeyPem,
+              privateKeyPem: parsed.privateKeyPem,
+              createdAtMs: Date.now(),
+            }
+
+            fs.writeFileSync(this.identityPath, `${JSON.stringify(updated, null, 2)}\n`, { mode: 0o600 })
+            try {
+              fs.chmodSync(this.identityPath, 0o600)
+            } catch {}
+
+            return {
+              deviceId: derivedId,
+              publicKeyPem: parsed.publicKeyPem,
+              privateKeyPem: parsed.privateKeyPem,
+            }
+          }
+
+          return {
+            deviceId: parsed.deviceId,
+            publicKeyPem: parsed.publicKeyPem,
+            privateKeyPem: parsed.privateKeyPem,
+          }
+        }
+      }
+    } catch {}
+
+    const identity = this.generateIdentity()
+    const stored = {
+      version: 1,
+      deviceId: identity.deviceId,
+      publicKeyPem: identity.publicKeyPem,
+      privateKeyPem: identity.privateKeyPem,
+      createdAtMs: Date.now(),
+    }
+
+    this.ensureDir(this.identityPath)
+    fs.writeFileSync(this.identityPath, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 })
+    try {
+      fs.chmodSync(this.identityPath, 0o600)
+    } catch {}
+
+    return identity
+  }
+
+  private buildDeviceAuthPayloadV3(params: {
+    deviceId: string
+    clientId: string
+    clientMode: string
+    role: string
+    scopes: string[]
+    signedAtMs: number
+    token?: string | null
+    nonce: string
+    platform?: string | null
+    deviceFamily?: string | null
+  }): string {
+    return [
+      'v3',
+      params.deviceId,
+      params.clientId,
+      params.clientMode,
+      params.role,
+      params.scopes.join(','),
+      String(params.signedAtMs),
+      params.token ?? '',
+      params.nonce,
+      params.platform ?? '',
+      params.deviceFamily ?? '',
+    ].join('|')
+  }
+
+  private signDevicePayload(privateKeyPem: string, payload: string): string {
+    const key = crypto.createPrivateKey(privateKeyPem)
+    return this.base64UrlEncode(crypto.sign(null, Buffer.from(payload, 'utf8'), key))
+  }
+
+  private loadJsonFile<T>(filePath: string): T | null {
+    try {
+      return JSON.parse(fs.readFileSync(filePath, 'utf8')) as T
+    } catch {
+      return null
+    }
+  }
+
+  private loadTrustedCliAuth(): GatewayAuthContext | null {
+    const identityPath = path.join(this.openClawHome, 'identity', 'device.json')
+    const authPath = path.join(this.openClawHome, 'identity', 'device-auth.json')
+
+    const identityData = this.loadJsonFile<Partial<DeviceIdentity> & { version?: number }>(identityPath)
+    const authData = this.loadJsonFile<{
+      tokens?: {
+        operator?: {
+          token?: unknown
+          role?: unknown
+          scopes?: unknown
+        }
+      }
+    }>(authPath)
+
+    if (
+      !identityData ||
+      identityData.version !== 1 ||
+      typeof identityData.deviceId !== 'string' ||
+      typeof identityData.publicKeyPem !== 'string' ||
+      typeof identityData.privateKeyPem !== 'string'
+    ) {
+      return null
+    }
+
+    const token = authData?.tokens?.operator?.token
+    const role = authData?.tokens?.operator?.role
+    const scopes = authData?.tokens?.operator?.scopes
+
+    if (typeof token !== 'string' || !token.trim()) return null
+
+    const derivedId = this.fingerprintPublicKey(identityData.publicKeyPem)
+    if (derivedId !== identityData.deviceId) return null
+
+    return {
+      identity: {
+        deviceId: identityData.deviceId,
+        publicKeyPem: identityData.publicKeyPem,
+        privateKeyPem: identityData.privateKeyPem,
+      },
+      token,
+      role: typeof role === 'string' && role.trim() ? role : 'operator',
+      scopes: Array.isArray(scopes) && scopes.every((scope) => typeof scope === 'string')
+        ? scopes
+        : ['operator.admin', 'operator.write'],
+      clientId: 'cli',
+      clientMode: 'cli',
+      displayName: 'jarvis-electron',
+      devicePlatform: process.platform,
+      deviceFamily: '',
+    }
+  }
+
+  private resolveGatewayAuth(): GatewayAuthContext {
+    const trustedCli = this.loadTrustedCliAuth()
+    if (trustedCli) return trustedCli
+
+    return {
+      identity: this.loadOrCreateDeviceIdentity(),
+      token: this.config.token,
+      role: 'operator',
+      scopes: ['operator.admin', 'operator.write'],
+      clientId: 'gateway-client',
+      clientMode: 'ui',
+      displayName: 'jarvis-electron',
+      devicePlatform: 'electron',
+      deviceFamily: '',
+    }
+  }
+
+  private extractText(message: unknown): string {
+    if (!message) return ''
+
+    if (typeof message === 'string') return message
+
+    if (typeof message !== 'object') return ''
+
+    const maybeText = (message as { text?: unknown }).text
+    if (typeof maybeText === 'string') return maybeText
+
+    const content = (message as { content?: unknown }).content
+    if (typeof content === 'string') return content
+
+    if (!Array.isArray(content)) return ''
+
+    return content
+      .flatMap((item) => {
+        if (!item || typeof item !== 'object') return []
+        const text = (item as { type?: unknown; text?: unknown }).type === 'text'
+          ? (item as { text?: unknown }).text
+          : undefined
+        return typeof text === 'string' ? [text] : []
+      })
+      .join('')
   }
 
   async getStatus(): Promise<OpenClawStatus> {
     try {
-      const res = await fetch(`${this.config.baseUrl}/v1/health`, {
+      const res = await fetch(this.healthUrl, {
         headers: this.headers(),
         signal: AbortSignal.timeout(3000),
       })
-      if (res.ok) {
-        const data = await res.json().catch(() => ({}))
-        return { online: true, ...data }
+
+      if (!res.ok) return { online: false, error: `HTTP ${res.status}` }
+
+      const data = await res.json().catch(() => ({}))
+
+      return {
+        online: true,
+        model: this.config.model,
+        version: typeof data?.version === 'string' ? data.version : undefined,
       }
-      return { online: false, error: `HTTP ${res.status}` }
     } catch (err: unknown) {
-      return { online: false, error: err instanceof Error ? err.message : String(err) }
+      return {
+        online: false,
+        error: err instanceof Error ? err.message : String(err),
+      }
     }
   }
 
   async getSkills(): Promise<OpenClawSkill[]> {
-    try {
-      const res = await fetch(`${this.config.baseUrl}/v1/skills`, {
-        headers: this.headers(),
-        signal: AbortSignal.timeout(5000),
-      })
-      if (!res.ok) return []
-      return res.json()
-    } catch {
-      return []
-    }
+    return []
   }
 
-  /**
-   * Send a message to OpenClaw and stream the response.
-   * Tries SSE first (preferred for streaming), falls back to plain POST.
-   */
+  async startDetachedMessage(
+    message: string,
+    conversationId?: string
+  ): Promise<{ runId: string }> {
+    const auth = this.resolveGatewayAuth()
+    const { identity, clientId, clientMode, role, scopes } = auth
+    const runId = crypto.randomUUID()
+    const connectId = crypto.randomUUID()
+    const sendId = crypto.randomUUID()
+    const sessionKey = conversationId ?? 'main'
+
+    return await new Promise<{ runId: string }>((resolve, reject) => {
+      const ws = new WebSocket(this.wsUrl)
+      let finished = false
+      let accepted = false
+      let connectSent = false
+
+      const cleanup = () => {
+        if (finished) return
+        finished = true
+        clearTimeout(timeout)
+        try {
+          ws.close()
+        } catch {}
+      }
+
+      const fail = (message: string) => {
+        if (finished) return
+        finished = true
+        clearTimeout(timeout)
+        try {
+          ws.close()
+        } catch {}
+        reject(new Error(message))
+      }
+
+      const accept = () => {
+        if (accepted || finished) return
+        accepted = true
+        resolve({ runId })
+      }
+
+      const sendConnect = (nonce: string) => {
+        if (connectSent) return
+        connectSent = true
+
+        const signedAtMs = Date.now()
+        const payload = this.buildDeviceAuthPayloadV3({
+          deviceId: identity.deviceId,
+          clientId,
+          clientMode,
+          role,
+          scopes,
+          signedAtMs,
+          token: auth.token,
+          nonce,
+          platform: auth.devicePlatform,
+          deviceFamily: auth.deviceFamily ?? '',
+        })
+
+        const signature = this.signDevicePayload(identity.privateKeyPem, payload)
+
+        ws.send(JSON.stringify({
+          type: 'req',
+          id: connectId,
+          method: 'connect',
+          params: {
+            minProtocol: 3,
+            maxProtocol: 3,
+            client: {
+              id: clientId,
+              displayName: auth.displayName,
+              version: app.getVersion(),
+              platform: process.platform,
+              mode: clientMode,
+              instanceId: identity.deviceId,
+            },
+            role,
+            scopes,
+            caps: ['tool-events'],
+            auth: {
+              token: auth.token,
+            },
+            device: {
+              id: identity.deviceId,
+              publicKey: this.base64UrlEncode(this.derivePublicKeyRaw(identity.publicKeyPem)),
+              signature,
+              signedAt: signedAtMs,
+              nonce,
+            },
+          },
+        }))
+      }
+
+      const timeout = setTimeout(() => {
+        if (!accepted) fail('OpenClaw gateway timed out before execution start acknowledgement')
+        else cleanup()
+      }, 15 * 60_000)
+
+      ws.on('message', (raw: RawData) => {
+        if (finished) return
+
+        let frame: GatewayFrame
+        try {
+          frame = JSON.parse(String(raw))
+        } catch {
+          return
+        }
+
+        if (frame.type === 'event' && frame.event === 'connect.challenge') {
+          const nonce = (frame.payload as { nonce?: unknown } | undefined)?.nonce
+          if (typeof nonce === 'string' && nonce.trim()) sendConnect(nonce.trim())
+          else fail('Gateway connect challenge missing nonce')
+          return
+        }
+
+        if (frame.type === 'res' && frame.id === connectId) {
+          if (!frame.ok) {
+            fail(frame.error?.message ?? 'Gateway connect failed')
+            return
+          }
+
+          ws.send(JSON.stringify({
+            type: 'req',
+            id: sendId,
+            method: 'chat.send',
+            params: {
+              sessionKey,
+              message,
+              deliver: false,
+              idempotencyKey: runId,
+            },
+          }))
+          return
+        }
+
+        if (frame.type === 'res' && frame.id === sendId) {
+          if (!frame.ok) {
+            fail(frame.error?.message ?? 'Chat send failed')
+            return
+          }
+
+          accept()
+          return
+        }
+
+        if (frame.type !== 'event') return
+
+        if (frame.event === 'chat') {
+          const payload = frame.payload as {
+            runId?: unknown
+            state?: unknown
+            errorMessage?: unknown
+          } | undefined
+
+          if (payload?.runId !== runId) return
+
+          if (payload.state === 'final') {
+            cleanup()
+            return
+          }
+
+          if (payload.state === 'aborted') {
+            if (!accepted) fail('Request aborted before execution start acknowledgement')
+            else cleanup()
+            return
+          }
+
+          if (payload.state === 'error') {
+            const message = typeof payload.errorMessage === 'string' ? payload.errorMessage : 'Chat error'
+            if (!accepted) fail(message)
+            else cleanup()
+          }
+        }
+      })
+
+      ws.on('error', (err: Error) => {
+        if (!accepted) fail(err instanceof Error ? err.message : String(err))
+        else cleanup()
+      })
+
+      ws.on('close', () => {
+        if (!accepted) fail('Gateway connection closed before execution start acknowledgement')
+      })
+    })
+  }
+
   async sendMessage(
     message: string,
     conversationId: string | undefined,
-    onChunk: (chunk: StreamChunk) => void
+    _history: Array<{ role: string; content: string }>,
+    onEvent: (e: StreamEvent) => void
   ): Promise<void> {
-    const body = JSON.stringify({
-      message,
-      conversation_id: conversationId,
-      stream: true,
-    })
+    const auth = this.resolveGatewayAuth()
+    const { identity, clientId, clientMode, role, scopes } = auth
+    const runId = crypto.randomUUID()
+    const connectId = crypto.randomUUID()
+    const sendId = crypto.randomUUID()
+    const sessionKey = conversationId ?? 'main'
 
-    try {
-      await this.sendSSE(body, onChunk)
-    } catch {
-      // Fallback: plain POST (no streaming)
-      await this.sendPlain(body, onChunk)
-    }
-  }
+    onEvent({ type: 'start', payload: '' })
 
-  /**
-   * SSE streaming path — parses `data: {...}` lines from the response body.
-   */
-  private async sendSSE(body: string, onChunk: (chunk: StreamChunk) => void): Promise<void> {
-    const res = await fetch(`${this.config.baseUrl}/v1/message`, {
-      method: 'POST',
-      headers: { ...this.headers(), Accept: 'text/event-stream' },
-      body,
-    })
+    await new Promise<void>((resolve) => {
+      const ws = new WebSocket(this.wsUrl)
+      let latestText = ''
+      let finished = false
+      let connectSent = false
 
-    if (!res.ok || !res.body) {
-      throw new Error(`HTTP ${res.status}`)
-    }
-
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-
-      for (const line of lines) {
-        if (!line.startsWith('data:')) continue
-        const raw = line.slice(5).trim()
-        if (raw === '[DONE]') return
+      const finish = (finalEvent?: StreamEvent) => {
+        if (finished) return
+        finished = true
+        clearTimeout(timeout)
+        if (finalEvent) onEvent(finalEvent)
         try {
-          const parsed = JSON.parse(raw)
-          onChunk(this.normalizeChunk(parsed))
+          ws.close()
+        } catch {}
+        resolve()
+      }
+
+      const emitTextDelta = (nextText: string) => {
+        if (!nextText || nextText === latestText) return
+
+        const delta = nextText.startsWith(latestText)
+          ? nextText.slice(latestText.length)
+          : nextText
+
+        latestText = nextText
+        if (delta) onEvent({ type: 'token', payload: delta })
+      }
+
+      const sendConnect = (nonce: string) => {
+        if (connectSent) return
+        connectSent = true
+
+        const signedAtMs = Date.now()
+        const payload = this.buildDeviceAuthPayloadV3({
+          deviceId: identity.deviceId,
+          clientId,
+          clientMode,
+          role,
+          scopes,
+          signedAtMs,
+          token: auth.token,
+          nonce,
+          platform: auth.devicePlatform,
+          deviceFamily: auth.deviceFamily ?? '',
+        })
+
+        const signature = this.signDevicePayload(identity.privateKeyPem, payload)
+
+        ws.send(JSON.stringify({
+          type: 'req',
+          id: connectId,
+          method: 'connect',
+          params: {
+            minProtocol: 3,
+            maxProtocol: 3,
+            client: {
+              id: clientId,
+              displayName: auth.displayName,
+              version: app.getVersion(),
+              platform: process.platform,
+              mode: clientMode,
+              instanceId: identity.deviceId,
+            },
+            role,
+            scopes,
+            caps: ['tool-events'],
+            auth: {
+              token: auth.token,
+            },
+            device: {
+              id: identity.deviceId,
+              publicKey: this.base64UrlEncode(this.derivePublicKeyRaw(identity.publicKeyPem)),
+              signature,
+              signedAt: signedAtMs,
+              nonce,
+            },
+          },
+        }))
+      }
+
+      const timeout = setTimeout(() => {
+        finish({ type: 'error', payload: 'OpenClaw gateway timed out' })
+      }, 60_000)
+
+      ws.on('message', (raw: RawData) => {
+        if (finished) return
+
+        let frame: GatewayFrame
+        try {
+          frame = JSON.parse(String(raw))
         } catch {
-          // non-JSON line, treat as raw text
-          if (raw) onChunk({ type: 'text', content: raw })
+          return
         }
-      }
-    }
-  }
 
-  /**
-   * Plain POST fallback — treats entire response as a single text chunk.
-   */
-  private async sendPlain(body: string, onChunk: (chunk: StreamChunk) => void): Promise<void> {
-    const res = await fetch(`${this.config.baseUrl}/v1/message`, {
-      method: 'POST',
-      headers: this.headers(),
-      body,
+        if (frame.type === 'event' && frame.event === 'connect.challenge') {
+          const nonce = (frame.payload as { nonce?: unknown } | undefined)?.nonce
+          if (typeof nonce === 'string' && nonce.trim()) sendConnect(nonce.trim())
+          else finish({ type: 'error', payload: 'Gateway connect challenge missing nonce' })
+          return
+        }
+
+        if (frame.type === 'res' && frame.id === connectId) {
+          if (!frame.ok) {
+            finish({ type: 'error', payload: frame.error?.message ?? 'Gateway connect failed' })
+            return
+          }
+
+          ws.send(JSON.stringify({
+            type: 'req',
+            id: sendId,
+            method: 'chat.send',
+            params: {
+              sessionKey,
+              message,
+              deliver: false,
+              idempotencyKey: runId,
+            },
+          }))
+          return
+        }
+
+        if (frame.type === 'res' && frame.id === sendId) {
+          if (!frame.ok) {
+            finish({ type: 'error', payload: frame.error?.message ?? 'Chat send failed' })
+          }
+          return
+        }
+
+        if (frame.type !== 'event') return
+
+        if (frame.event === 'agent') {
+          const payload = frame.payload as {
+            runId?: unknown
+            stream?: unknown
+            data?: { delta?: unknown; text?: unknown }
+          } | undefined
+
+          if (payload?.runId !== runId || payload.stream !== 'assistant') return
+
+          const nextText = typeof payload.data?.text === 'string'
+            ? payload.data.text
+            : typeof payload.data?.delta === 'string'
+              ? latestText + payload.data.delta
+              : ''
+
+          emitTextDelta(nextText)
+          return
+        }
+
+        if (frame.event !== 'chat') return
+
+        const payload = frame.payload as {
+          runId?: unknown
+          state?: unknown
+          message?: unknown
+          errorMessage?: unknown
+        } | undefined
+
+        if (payload?.runId !== runId) return
+
+        if (payload.state === 'delta') {
+          emitTextDelta(this.extractText(payload.message))
+          return
+        }
+
+        if (payload.state === 'final') {
+          emitTextDelta(this.extractText(payload.message))
+          finish({ type: 'end', payload: '' })
+          return
+        }
+
+        if (payload.state === 'aborted') {
+          emitTextDelta(this.extractText(payload.message))
+          finish({ type: 'error', payload: 'Request aborted' })
+          return
+        }
+
+        if (payload.state === 'error') {
+          finish({
+            type: 'error',
+            payload: typeof payload.errorMessage === 'string' ? payload.errorMessage : 'Chat error',
+          })
+        }
+      })
+
+      ws.on('error', (err: Error) => {
+        finish({ type: 'error', payload: err instanceof Error ? err.message : String(err) })
+      })
+
+      ws.on('close', () => {
+        if (!finished) finish({ type: 'error', payload: 'Gateway connection closed' })
+      })
     })
-
-    const data = await res.json().catch(async () => {
-      const text = await res.text()
-      return { text }
-    })
-
-    const content =
-      data?.response ?? data?.message ?? data?.text ?? data?.content ?? JSON.stringify(data)
-
-    onChunk({ type: 'text', content })
-  }
-
-  /**
-   * Normalizes various OpenClaw response shapes into our StreamChunk format.
-   */
-  private normalizeChunk(raw: Record<string, unknown>): StreamChunk {
-    // OpenClaw SSE events vary by version — handle multiple shapes
-    if (raw.type === 'content_block_delta') {
-      const delta = (raw.delta as Record<string, unknown>) ?? {}
-      return { type: 'text', content: String(delta.text ?? delta.content ?? '') }
-    }
-    if (raw.type === 'tool_use' || raw.type === 'tool_start') {
-      return {
-        type: 'tool_start',
-        content: String(raw.name ?? ''),
-        toolName: String(raw.name ?? ''),
-        toolInput: raw.input,
-      }
-    }
-    if (raw.type === 'tool_result' || raw.type === 'tool_end') {
-      return {
-        type: 'tool_end',
-        content: String(raw.output ?? raw.result ?? ''),
-        toolName: String(raw.name ?? ''),
-        toolOutput: raw.output ?? raw.result,
-      }
-    }
-    // Generic text delta
-    const text = raw.text ?? raw.content ?? raw.delta ?? raw.response
-    if (text) return { type: 'text', content: String(text) }
-    return { type: 'text', content: JSON.stringify(raw) }
   }
 }

@@ -1,12 +1,29 @@
 /**
- * Preload script — the secure bridge between Electron main and the React renderer.
- * Only explicitly exposed methods are accessible from the renderer.
+ * Preload — secure bridge between Electron main and the React renderer.
+ * Only explicitly exposed methods are accessible (contextBridge).
  */
 
 import { contextBridge, ipcRenderer } from 'electron'
-import type { StreamChunk } from './openclaw'
+import type { StreamEvent } from './openclaw'
+import type {
+  BuilderExecutionHistoryQuery,
+  BuilderExecutionHistoryResult,
+  BuilderExecutionFinalizeInput,
+  BuilderExecutionFinalizeResult,
+  BuilderExecutionRemediationRequestInput,
+  BuilderExecutionRemediationRequestResult,
+  BuilderExecutionRequestCreateInput,
+  BuilderExecutionRequestCreateResult,
+  BuilderExecutionRequestSettleInput,
+  BuilderExecutionRequestSettleResult,
+  BuilderExecutionStartInput,
+  BuilderExecutionStartResult,
+  BuilderPlanBridgeRequest,
+  BuilderPlanBridgeResult,
+  CheckerVerifyRunInput,
+  CheckerVerifyRunResult,
+} from '../src/shared/builder-bridge'
 
-// Type-safe API exposed to window.jarvis in the renderer
 const jarvisAPI = {
   // ── Window controls ──────────────────────────────────────────────────────────
   window: {
@@ -17,32 +34,58 @@ const jarvisAPI = {
 
   // ── OpenClaw ─────────────────────────────────────────────────────────────────
   openclaw: {
-    /** Send a message; chunks arrive via onChunk listener */
-    send: (message: string, conversationId?: string) =>
-      ipcRenderer.invoke('openclaw:send', { message, conversationId }),
+    /**
+     * Send a message. Events arrive via `onStream`.
+     * Returns when IPC invoke resolves (after stream completes or errors).
+     */
+    send: (
+      message:        string,
+      conversationId?: string,
+      history?:       Array<{ role: string; content: string }>
+    ) => ipcRenderer.invoke('openclaw:send', { message, conversationId, history }),
 
-    /** Register a listener for streaming chunks */
-    onChunk: (cb: (chunk: StreamChunk) => void) => {
-      const handler = (_: Electron.IpcRendererEvent, chunk: StreamChunk) => cb(chunk)
-      ipcRenderer.on('openclaw:chunk', handler)
-      return () => ipcRenderer.removeListener('openclaw:chunk', handler)
+    /**
+     * Unified stream listener.
+     * Events: { type: 'start'|'token'|'end'|'error'|'log', payload, meta? }
+     * Returns an unsubscribe function.
+     */
+    onStream: (cb: (event: StreamEvent) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, e: StreamEvent) => cb(e)
+      ipcRenderer.on('openclaw:stream', handler)
+      return () => ipcRenderer.removeListener('openclaw:stream', handler)
     },
 
-    /** Register a listener for stream completion */
-    onDone: (cb: () => void) => {
-      const handler = () => cb()
-      ipcRenderer.on('openclaw:done', handler)
-      return () => ipcRenderer.removeListener('openclaw:done', handler)
+    // ── Convenience wrappers (used by InputBar) ───────────────────────────────
+    /** @deprecated Use onStream — kept for backward compat */
+    onChunk: (cb: (chunk: { type: string; content: string }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, e: StreamEvent) => {
+        if (e.type === 'token') cb({ type: 'text', content: e.payload })
+        if (e.type === 'log' && e.meta?.isToolStart)
+          cb({ type: 'tool_start', content: e.meta.toolName ?? '' })
+        if (e.type === 'log' && e.meta?.isToolEnd)
+          cb({ type: 'tool_end', content: e.meta.toolName ?? '' })
+      }
+      ipcRenderer.on('openclaw:stream', handler)
+      return () => ipcRenderer.removeListener('openclaw:stream', handler)
+    },
+    /** @deprecated Use onStream */
+    onDone: (cb: () => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, e: StreamEvent) => {
+        if (e.type === 'end') cb()
+      }
+      ipcRenderer.on('openclaw:stream', handler)
+      return () => ipcRenderer.removeListener('openclaw:stream', handler)
+    },
+    /** @deprecated Use onStream */
+    onError: (cb: (msg: string) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, e: StreamEvent) => {
+        if (e.type === 'error') cb(e.payload)
+      }
+      ipcRenderer.on('openclaw:stream', handler)
+      return () => ipcRenderer.removeListener('openclaw:stream', handler)
     },
 
-    /** Register a listener for stream errors */
-    onError: (cb: (msg: string) => void) => {
-      const handler = (_: Electron.IpcRendererEvent, msg: string) => cb(msg)
-      ipcRenderer.on('openclaw:error', handler)
-      return () => ipcRenderer.removeListener('openclaw:error', handler)
-    },
-
-    /** Get OpenClaw gateway status */
+    /** Gateway health check */
     status: () => ipcRenderer.invoke('openclaw:status'),
 
     /** List enabled skills */
@@ -53,9 +96,45 @@ const jarvisAPI = {
   shell: {
     open: (url: string) => ipcRenderer.invoke('shell:open', url),
   },
+
+  // ── FS: read backend markdown files ──────────────────────────────────────────
+  fs: {
+    readFile: (path: string): Promise<{ ok: boolean; content: string; error?: string }> =>
+      ipcRenderer.invoke('fs:readFile', path),
+  },
+
+  // ── Builder bridge ───────────────────────────────────────────────────────────
+  builderPlan: {
+    planTask: (request: BuilderPlanBridgeRequest): Promise<BuilderPlanBridgeResult> =>
+      ipcRenderer.invoke('builder:planTask', request),
+  },
+
+  builderExecutionRequest: {
+    createRequest: (input: BuilderExecutionRequestCreateInput): Promise<BuilderExecutionRequestCreateResult> =>
+      ipcRenderer.invoke('builder:createExecutionRequest', input),
+    createRemediationRequest: (
+      input: BuilderExecutionRemediationRequestInput
+    ): Promise<BuilderExecutionRemediationRequestResult> =>
+      ipcRenderer.invoke('builder:createRemediationRequest', input),
+    settle: (input: BuilderExecutionRequestSettleInput): Promise<BuilderExecutionRequestSettleResult> =>
+      ipcRenderer.invoke('builder:settleExecutionRequest', input),
+  },
+
+  builderExecution: {
+    start: (input: BuilderExecutionStartInput): Promise<BuilderExecutionStartResult> =>
+      ipcRenderer.invoke('builder:startExecution', input),
+    finalize: (input: BuilderExecutionFinalizeInput): Promise<BuilderExecutionFinalizeResult> =>
+      ipcRenderer.invoke('builder:finalizeExecution', input),
+    listHistory: (query: BuilderExecutionHistoryQuery): Promise<BuilderExecutionHistoryResult> =>
+      ipcRenderer.invoke('builder:listExecutionHistory', query),
+  },
+
+  checker: {
+    verifyRun: (input: CheckerVerifyRunInput): Promise<CheckerVerifyRunResult> =>
+      ipcRenderer.invoke('checker:verifyRun', input),
+  },
 }
 
 contextBridge.exposeInMainWorld('jarvis', jarvisAPI)
 
-// ── Type declaration (consumed by renderer TypeScript) ─────────────────────────
 export type JarvisAPI = typeof jarvisAPI

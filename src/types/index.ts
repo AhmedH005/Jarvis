@@ -1,3 +1,19 @@
+// ── Stream event (unified IPC contract) ──────────────────────────────────────
+// Used across: electron/openclaw.ts → main.ts → preload.ts → renderer
+export interface StreamEvent {
+  type: 'start' | 'token' | 'end' | 'error' | 'log'
+  payload: string
+  /** Optional tool metadata (tool_start / tool_end events carry this) */
+  meta?: {
+    toolName?: string
+    toolInput?: unknown
+    toolOutput?: unknown
+    isToolStart?: boolean
+    isToolEnd?: boolean
+  }
+}
+
+// ── Legacy chunk type (kept for backward compat) ──────────────────────────────
 export interface StreamChunk {
   type: 'text' | 'tool_start' | 'tool_end' | 'error'
   content: string
@@ -6,6 +22,10 @@ export interface StreamChunk {
   toolOutput?: unknown
 }
 
+// ── UI state phases (drives Stark-style animation states) ─────────────────────
+export type StreamPhase = 'idle' | 'start' | 'streaming' | 'complete' | 'error'
+
+// ── Message ───────────────────────────────────────────────────────────────────
 export interface Message {
   id: string
   role: 'user' | 'assistant'
@@ -25,6 +45,7 @@ export interface ToolCall {
   completedAt?: Date
 }
 
+// ── OpenClaw status ───────────────────────────────────────────────────────────
 export interface OpenClawStatus {
   online: boolean
   model?: string
@@ -32,12 +53,14 @@ export interface OpenClawStatus {
   error?: string
 }
 
+// ── Config ────────────────────────────────────────────────────────────────────
 export interface JarvisConfig {
   theme: {
     primaryColor: string
     glowIntensity: number   // 0-100
     animationSpeed: number  // 0.5 to 2.0
     opacity: number         // 0.7 to 1.0
+    soundEnabled: boolean
   }
   layout: {
     leftPanelWidth: number
@@ -60,6 +83,7 @@ export const DEFAULT_CONFIG: JarvisConfig = {
     glowIntensity: 60,
     animationSpeed: 1.0,
     opacity: 0.95,
+    soundEnabled: true,
   },
   layout: {
     leftPanelWidth: 260,

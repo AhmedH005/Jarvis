@@ -1,146 +1,193 @@
 import { useState, useRef, useEffect, KeyboardEvent } from 'react'
-import { motion } from 'framer-motion'
-import { Send, Square, Mic } from 'lucide-react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { Send } from 'lucide-react'
 import { useJarvisStore } from '@/store/jarvis'
 import { nanoid } from '@/lib/utils'
-import type { Message, StreamChunk } from '@/types'
+import { playSendTone, resumeAudio } from '@/lib/audio'
+import { getReactorDisplayStatus } from '@/lib/reactor-display'
+import type { Message, StreamEvent } from '@/types'
 
 export function InputBar() {
-  const [text, setText]           = useState('')
-  const textareaRef               = useRef<HTMLTextAreaElement>(null)
-  const isStreaming               = useJarvisStore((s) => s.isStreaming)
-  const setIsStreaming            = useJarvisStore((s) => s.setIsStreaming)
-  const addMessage                = useJarvisStore((s) => s.addMessage)
-  const appendChunk               = useJarvisStore((s) => s.appendChunk)
-  const finalizeMessage           = useJarvisStore((s) => s.finalizeMessage)
-  const pushLog                   = useJarvisStore((s) => s.pushLog)
-  const conversationId            = useJarvisStore((s) => s.conversationId)
-  const ocStatus                  = useJarvisStore((s) => s.ocStatus)
+  const [text,    setText]    = useState('')
+  const [focused, setFocused] = useState(false)
+  const [flash,   setFlash]   = useState(false)
+  const textareaRef           = useRef<HTMLTextAreaElement>(null)
+
+  const streamPhase     = useJarvisStore((s) => s.streamPhase)
+  const setStreamPhase  = useJarvisStore((s) => s.setStreamPhase)
+  const addMessage      = useJarvisStore((s) => s.addMessage)
+  const applyStreamEvent = useJarvisStore((s) => s.applyStreamEvent)
+  const finalizeMessage = useJarvisStore((s) => s.finalizeMessage)
+  const pushLog         = useJarvisStore((s) => s.pushLog)
+  const conversationId  = useJarvisStore((s) => s.conversationId)
+  const ocStatus        = useJarvisStore((s) => s.ocStatus)
+  const statusChecked   = useJarvisStore((s) => s.statusChecked)
+  const reactorVisualLive = useJarvisStore((s) => s.reactorVisualLive)
+  const config          = useJarvisStore((s) => s.config)
+  const messages        = useJarvisStore((s) => s.messages)
+
+  const isStreaming = streamPhase === 'streaming' || streamPhase === 'start'
+  // Allow sending any time we have text and aren't already streaming
+  const canSend     = text.trim().length > 0 && !isStreaming
 
   // Auto-resize textarea
   useEffect(() => {
     const el = textareaRef.current
     if (!el) return
     el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 120)}px`
+    el.style.height = `${Math.min(el.scrollHeight, 100)}px`
   }, [text])
 
-  const canSend = text.trim().length > 0 && !isStreaming && ocStatus.online
+  // Focus on mount
+  useEffect(() => {
+    if (!isStreaming) textareaRef.current?.focus()
+  }, [isStreaming])
 
   const handleSend = async () => {
     if (!canSend) return
+    resumeAudio()
+    if (config.theme.soundEnabled) playSendTone()
+
     const userText = text.trim()
     setText('')
 
+    setFlash(true)
+    setTimeout(() => setFlash(false), 300)
+
+    // Build history for OpenAI context (last 12 turns)
+    const history = messages.slice(-12).map((m) => ({
+      role:    m.role as 'user' | 'assistant',
+      content: m.content,
+    }))
+
     // Add user message
-    const userMsg: Message = {
-      id: nanoid(),
-      role: 'user',
-      content: userText,
-      timestamp: new Date(),
-    }
-    addMessage(userMsg)
+    addMessage({ id: nanoid(), role: 'user', content: userText, timestamp: new Date() } as Message)
 
-    // Prepare assistant message placeholder
+    // Placeholder assistant message
     const asstId = nanoid()
-    const asstMsg: Message = {
-      id: asstId,
-      role: 'assistant',
-      content: '',
-      timestamp: new Date(),
-      streaming: true,
+    addMessage({ id: asstId, role: 'assistant', content: '', timestamp: new Date(), streaming: true })
+    pushLog(`→ ${userText.slice(0, 60)}${userText.length > 60 ? '…' : ''}`)
+
+    if (!window.jarvis) {
+      applyStreamEvent(asstId, { type: 'error', payload: 'No Electron bridge — run inside the app' })
+      setStreamPhase('error')
+      return
     }
-    addMessage(asstMsg)
-    setIsStreaming(true)
-    pushLog(`Sending: ${userText.slice(0, 60)}…`)
 
-    // Register listeners before invoking send
-    const unsubChunk = window.jarvis.openclaw.onChunk((chunk: StreamChunk) => {
-      appendChunk(asstId, chunk)
-    })
-    const unsubDone = window.jarvis.openclaw.onDone(() => {
-      finalizeMessage(asstId)
-      setIsStreaming(false)
-      pushLog('Response complete')
-      cleanup()
-    })
-    const unsubError = window.jarvis.openclaw.onError((msg: string) => {
-      finalizeMessage(asstId)
-      setIsStreaming(false)
-      pushLog(`Error: ${msg}`)
-      cleanup()
-    })
-
+    let cleaned = false
     const cleanup = () => {
-      unsubChunk()
-      unsubDone()
-      unsubError()
+      if (!cleaned) { cleaned = true; unsub() }
     }
+
+    const unsub = window.jarvis.openclaw.onStream((event: StreamEvent) => {
+      applyStreamEvent(asstId, event)
+      if (event.type === 'log')   pushLog(event.payload, event.meta?.isToolStart ? 'info' : 'success')
+      if (event.type === 'end')   { pushLog('← complete', 'success'); cleanup() }
+      if (event.type === 'error') { pushLog(`✗ ${event.payload}`, 'error'); cleanup() }
+    })
 
     try {
-      await window.jarvis.openclaw.send(userText, conversationId)
+      await window.jarvis.openclaw.send(userText, conversationId, history)
     } catch (err) {
-      pushLog(`Send failed: ${String(err)}`)
-      finalizeMessage(asstId)
-      setIsStreaming(false)
+      const msg = String(err)
+      pushLog(`Send failed: ${msg}`, 'error')
+      applyStreamEvent(asstId, { type: 'error', payload: msg })
+      setStreamPhase('error')
       cleanup()
     }
   }
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      handleSend()
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
   }
 
+  const borderColor = isStreaming ? 'rgba(0,212,255,0.4)'
+    : focused       ? 'rgba(0,212,255,0.28)'
+    :                 'rgba(0,212,255,0.14)'
+
+  const displayStatus = getReactorDisplayStatus({ reactorVisualLive, statusChecked, ocStatus })
+  const gatewayOffline = statusChecked && !ocStatus.online
+
   return (
-    <div className="px-4 pb-4">
+    <div className="px-4 pb-2 pt-1">
       <motion.div
-        className="flex items-end gap-2 border rounded-lg p-2 bg-jarvis-surface"
-        style={{ borderColor: isStreaming ? '#00d4ff44' : '#0d2137' }}
-        animate={isStreaming ? { boxShadow: ['0 0 0px #00d4ff00', '0 0 16px #00d4ff33', '0 0 0px #00d4ff00'] } : {}}
-        transition={{ duration: 1.5, repeat: Infinity }}
+        className="flex items-end gap-3 px-4 py-2 rounded"
+        style={{
+          border:     `1px solid ${borderColor}`,
+          background: 'rgba(0,212,255,0.03)',
+          boxShadow:  isStreaming ? '0 0 20px rgba(0,212,255,0.1)'
+            : focused ? '0 0 10px rgba(0,212,255,0.06)' : 'none',
+          transition: 'border-color 0.3s ease, box-shadow 0.3s ease',
+        }}
       >
         <textarea
           ref={textareaRef}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={ocStatus.online ? "Send a message… (Enter to send)" : "OpenClaw offline"}
-          disabled={isStreaming || !ocStatus.online}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          placeholder={
+            isStreaming ? 'Waiting for response…'
+            : !reactorVisualLive ? 'Reactor offline — click the orb to bring JARVIS online…'
+            : gatewayOffline ? 'JARVIS online — gateway may still fail…'
+            : 'Ask JARVIS… (Enter to send)'
+          }
+          disabled={isStreaming}
           rows={1}
-          className="flex-1 bg-transparent resize-none outline-none text-sm font-mono text-jarvis-text placeholder:text-jarvis-muted min-h-[24px] max-h-[120px] leading-6"
-          style={{ userSelect: 'text' } as React.CSSProperties}
+          className="flex-1 bg-transparent resize-none outline-none font-mono text-sm leading-6"
+          style={{
+            color:      'rgba(192,232,240,0.9)',
+            caretColor: '#00d4ff',
+            minHeight:  24,
+            maxHeight:  100,
+            userSelect: 'text',
+          } as React.CSSProperties}
         />
-        <div className="flex items-center gap-1 pb-0.5">
-          <button
-            className="w-7 h-7 rounded flex items-center justify-center text-jarvis-muted hover:text-jarvis-text hover:bg-white/5 transition-colors"
-            title="Voice input (coming soon)"
-            disabled
-          >
-            <Mic className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={handleSend}
-            disabled={!canSend}
-            className="w-7 h-7 rounded flex items-center justify-center transition-all"
-            style={{
-              background: canSend ? '#00d4ff22' : 'transparent',
-              color: canSend ? '#00d4ff' : '#4a7a8a',
-              boxShadow: canSend ? '0 0 8px #00d4ff33' : 'none',
-            }}
-          >
-            {isStreaming
-              ? <Square className="w-3.5 h-3.5" />
-              : <Send  className="w-3.5 h-3.5" />
-            }
-          </button>
-        </div>
+
+        <motion.button
+          onClick={handleSend}
+          disabled={!canSend}
+          animate={flash ? { scale: [1, 0.82, 1] } : { scale: 1 }}
+          transition={{ duration: 0.25, ease: 'easeOut' }}
+          style={{
+            width:          28,
+            height:         28,
+            borderRadius:   4,
+            display:        'flex',
+            alignItems:     'center',
+            justifyContent: 'center',
+            background:     canSend ? 'rgba(0,212,255,0.14)' : 'transparent',
+            color:          canSend ? '#00d4ff' : 'rgba(0,212,255,0.25)',
+            border:         `1px solid ${canSend ? 'rgba(0,212,255,0.35)' : 'rgba(0,212,255,0.08)'}`,
+            boxShadow:      canSend ? '0 0 8px rgba(0,212,255,0.2)' : 'none',
+            transition:     'all 0.25s ease',
+            flexShrink:     0,
+            cursor:         canSend ? 'pointer' : 'not-allowed',
+          }}
+        >
+          <AnimatePresence mode="wait">
+            <motion.div key="send" initial={{ scale: 0.7 }} animate={{ scale: 1 }} exit={{ scale: 0.7 }}>
+              <Send className="w-3.5 h-3.5" />
+            </motion.div>
+          </AnimatePresence>
+        </motion.button>
       </motion.div>
-      <p className="text-[10px] text-jarvis-muted font-mono mt-1 text-center">
-        Enter to send · Shift+Enter for new line
-      </p>
+
+      <div className="flex items-center justify-center mt-1">
+        <p className="text-[9px] font-mono" style={{ color: 'rgba(74,122,138,0.55)' }}>
+          {isStreaming
+            ? <motion.span animate={{ opacity: [0.5, 1, 0.5] }} transition={{ duration: 1, repeat: Infinity }}>
+                ● JARVIS IS RESPONDING
+              </motion.span>
+            : !reactorVisualLive
+              ? <span style={{ color: 'rgba(255,154,84,0.72)' }}>○ reactor offline · click orb to activate</span>
+            : gatewayOffline
+              ? <span style={{ color: 'rgba(255,200,74,0.72)' }}>◌ reactor online · gateway unavailable</span>
+              : <span style={{ color: displayStatus.color }}>Enter ↵ to send  ·  Shift+Enter for newline</span>
+          }
+        </p>
+      </div>
     </div>
   )
 }

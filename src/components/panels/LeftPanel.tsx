@@ -1,9 +1,20 @@
 import { motion } from 'framer-motion'
 import { Brain, CheckSquare, ScrollText, ChevronLeft } from 'lucide-react'
 import { useJarvisStore } from '@/store/jarvis'
-import { cn } from '@/lib/utils'
 
-export function LeftPanel() {
+interface Props {
+  engaged?: boolean
+}
+
+/**
+ * LeftPanel — Memory, Tasks, System Log.
+ *
+ * Stark patterns applied:
+ *   - `.bright` filter (brightness 1.4) when engaged (streaming)
+ *   - `--transition-speed: 0.6s ease` on filter changes
+ *   - System log styled as a console with colored prefixes
+ */
+export function LeftPanel({ engaged = false }: Props) {
   const config    = useJarvisStore((s) => s.config)
   const setConfig = useJarvisStore((s) => s.setConfig)
   const messages  = useJarvisStore((s) => s.messages)
@@ -11,19 +22,25 @@ export function LeftPanel() {
 
   if (!config.layout.showLeftPanel) return null
 
-  // Derive recent memories from conversation (placeholder until real memory API)
   const recentTopics = messages
     .filter((m) => m.role === 'user')
-    .slice(-4)
+    .slice(-5)
     .reverse()
-    .map((m) => m.content.slice(0, 40))
+    .map((m) => m.content.slice(0, 42))
 
   return (
-    <motion.div
-      initial={{ x: -20, opacity: 0 }}
-      animate={{ x: 0, opacity: 1 }}
-      className="flex flex-col border-r border-jarvis-border hud-panel"
-      style={{ width: config.layout.leftPanelWidth, minWidth: 220 }}
+    <div
+      className="flex flex-col border-r border-jarvis-border hud-panel h-full"
+      style={{
+        width:    config.layout.leftPanelWidth,
+        minWidth: 220,
+        filter:   engaged ? 'brightness(1.2)' : 'brightness(1)',
+        transition: 'filter 0.6s ease, border-color 0.6s ease, box-shadow 0.6s ease',
+        ...(engaged ? {
+          borderColor: 'rgba(0,212,255,0.27)',
+          boxShadow:   '0 0 20px rgba(0,212,255,0.08)',
+        } : {}),
+      }}
     >
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-jarvis-border">
@@ -37,17 +54,25 @@ export function LeftPanel() {
       </div>
 
       <div className="flex-1 overflow-y-auto space-y-px py-2">
-        {/* Memory Surface */}
+        {/* Memory */}
         {config.widgets.memory && (
           <PanelSection icon={Brain} title="MEMORY" color="#00d4ff">
             {recentTopics.length === 0 ? (
-              <p className="text-[10px] text-jarvis-muted font-mono px-3 py-2">No recent context</p>
+              <p className="text-[10px] text-jarvis-muted font-mono px-3 py-2 opacity-60">
+                No recent context
+              </p>
             ) : (
               <ul className="px-3 py-1 space-y-1">
                 {recentTopics.map((t, i) => (
-                  <li key={i} className="text-[10px] font-mono text-jarvis-muted truncate">
+                  <motion.li
+                    key={i}
+                    initial={{ opacity: 0, x: -4 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: i * 0.05 }}
+                    className="text-[10px] font-mono text-jarvis-muted truncate"
+                  >
                     <span className="text-jarvis-primary mr-1.5">›</span>{t}
-                  </li>
+                  </motion.li>
                 ))}
               </ul>
             )}
@@ -58,26 +83,44 @@ export function LeftPanel() {
         {config.widgets.tasks && (
           <PanelSection icon={CheckSquare} title="TASKS" color="#00ff88">
             <p className="text-[10px] text-jarvis-muted font-mono px-3 py-2">
-              OpenClaw task integration
+              OpenClaw integration
               <br />
-              <span className="opacity-50">coming in v0.2</span>
+              <span className="opacity-40">v0.2</span>
             </p>
           </PanelSection>
         )}
 
-        {/* System log */}
+        {/* System Log — console style */}
         {config.widgets.logs && (
           <PanelSection icon={ScrollText} title="SYSTEM LOG" color="#ff6b35">
-            <div className="px-3 py-1 space-y-0.5 max-h-32 overflow-y-auto">
-              {logs.slice(-10).reverse().map((line, i) => (
-                <p key={i} className="text-[9px] font-mono text-jarvis-muted leading-relaxed">{line}</p>
+            <div className="px-2 py-1 space-y-px max-h-48 overflow-y-auto font-mono text-[9px]">
+              {logs.length === 0 && (
+                <p className="text-jarvis-muted opacity-40 px-1">Awaiting events…</p>
+              )}
+              {logs.slice(-20).reverse().map((line, i) => (
+                <p
+                  key={i}
+                  className="leading-relaxed truncate"
+                  style={{ color: logColor(line) }}
+                >
+                  {line}
+                </p>
               ))}
             </div>
           </PanelSection>
         )}
       </div>
-    </motion.div>
+    </div>
   )
+}
+
+/** Color code log lines by their prefix symbol */
+function logColor(line: string): string {
+  if (line.includes('] ✓')) return '#00ff88'
+  if (line.includes('] ✗')) return '#ff6b35'
+  if (line.includes('] ⚠')) return '#ffbd2e'
+  if (line.includes('] ⚡')) return '#00d4ff'
+  return '#4a7a8a'
 }
 
 function PanelSection({
@@ -86,13 +129,13 @@ function PanelSection({
   color,
   children,
 }: {
-  icon: React.ComponentType<{ className?: string }>
-  title: string
-  color: string
+  icon:     React.ComponentType<{ className?: string; style?: React.CSSProperties }>
+  title:    string
+  color:    string
   children: React.ReactNode
 }) {
   return (
-    <div className="border-b border-jarvis-border/40">
+    <div className="border-b border-jarvis-border/30">
       <div className="flex items-center gap-2 px-3 py-1.5">
         <Icon className="w-3 h-3" style={{ color }} />
         <span className="text-[9px] font-mono tracking-widest" style={{ color }}>{title}</span>
