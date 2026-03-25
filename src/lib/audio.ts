@@ -15,6 +15,10 @@ function getCtx(): AudioContext {
   return ctx
 }
 
+export function getAudioContext(): AudioContext {
+  return getCtx()
+}
+
 /** AI awakening — full boot chime with harmonic overtone, ~2.2s */
 export function playBootChime(volume = 1): void {
   try {

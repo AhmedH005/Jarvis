@@ -26,11 +26,11 @@ const CAT_COLOR: Record<PaletteCommand['category'], string> = {
 // ── Agents ────────────────────────────────────────────────────────────────────
 
 const AGENTS: Array<{ id: AgentPersonaId; name: string }> = [
-  { id: 'kai',        name: 'Kai'        },
-  { id: 'maya',       name: 'Maya'       },
-  { id: 'alex',       name: 'Alex'       },
-  { id: 'researcher', name: 'Researcher' },
-  { id: 'noah',       name: 'Noah'       },
+  { id: 'researcher', name: 'Bruce'   },
+  { id: 'alex',       name: 'Tony'    },
+  { id: 'kai',        name: 'Steve'   },
+  { id: 'maya',       name: 'Natasha' },
+  { id: 'noah',       name: 'Nick'    },
 ]
 
 // ── Main component ─────────────────────────────────────────────────────────────

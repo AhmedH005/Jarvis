@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useJarvisStore } from '@/store/jarvis'
+import { useUIState } from '@/store/uiState'
 import type { StreamPhase } from '@/types'
 
 interface BgParticle {
@@ -71,11 +72,14 @@ export function Background() {
   const streamPhase = useJarvisStore((s) => s.streamPhase)
   const ocStatus = useJarvisStore((s) => s.ocStatus)
   const reactorVisualLive = useJarvisStore((s) => s.reactorVisualLive)
+  const appMode = useUIState((s) => s.mode)
   phaseRef.current = streamPhase
   const ocOnlineRef = useRef(false)
   ocOnlineRef.current = ocStatus.online
   const visualLiveRef = useRef(false)
   visualLiveRef.current = reactorVisualLive
+  const appModeRef = useRef(appMode)
+  appModeRef.current = appMode
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -90,6 +94,10 @@ export function Background() {
     let time = 0
     let gridOffset = 0
     const particles: BgParticle[] = []
+    // Smoothly interpolated glow center Y ratio + intensity multiplier
+    let glowYRatio = 0.5    // start centered (idle position)
+    let glowIntensity = 1.0 // full intensity
+    let activateProgress = 0 // 0→1 over activation sequence
     const visual = {
       r: BOOTING.r,
       g: BOOTING.g,
@@ -135,12 +143,49 @@ export function Background() {
     resize()
     window.addEventListener('resize', resize)
 
+    const lerpN = (a: number, b: number, t: number) => a + (b - a) * t
+
     const draw = () => {
       const dpr = window.devicePixelRatio || 1
-      const phase =
+      let phase =
         !visualLiveRef.current ? BOOTING
         : ocOnlineRef.current ? PHASES[phaseRef.current] : PHASES.idle
-      const easing = visualLiveRef.current ? 0.05 : 0.04
+      let easing = visualLiveRef.current ? 0.05 : 0.04
+
+      // Activation overdrive — ramp up all visuals with color cycling
+      if (appModeRef.current === 'activating') {
+        activateProgress = Math.min(activateProgress + 1 / 240, 1.0) // 4s at 60fps
+        const ap = activateProgress
+
+        // Color cycle: orange → white-hot → cyan
+        let ar: number, ag: number, ab: number
+        if (ap < 0.3) {
+          const t = ap / 0.3
+          ar = lerpN(255, 255, t); ag = lerpN(136, 240, t); ab = lerpN(72, 210, t)
+        } else if (ap < 0.6) {
+          const t = (ap - 0.3) / 0.3
+          ar = lerpN(255, 50, t); ag = lerpN(240, 235, t); ab = lerpN(210, 255, t)
+        } else {
+          const t = (ap - 0.6) / 0.4
+          ar = lerpN(50, 0, t); ag = lerpN(235, 212, t); ab = 255
+        }
+
+        phase = {
+          r: ar, g: ag, b: ab,
+          grid: lerpN(0.14, 0.48, ap),
+          major: lerpN(0.24, 0.62, ap),
+          dots: lerpN(0.18, 0.52, ap),
+          diagonals: lerpN(0.05, 0.22, ap),
+          glow: lerpN(0.34, 1.0, ap),
+          particleBoost: lerpN(1, 3.8, ap),
+          scan: lerpN(0.08, 0.45, ap),
+          drift: lerpN(0.05, 0.55, ap),
+        }
+        easing = 0.12
+      } else if (activateProgress > 0) {
+        activateProgress = Math.max(activateProgress - 0.015, 0)
+      }
+
       visual.r += (phase.r - visual.r) * easing
       visual.g += (phase.g - visual.g) * easing
       visual.b += (phase.b - visual.b) * easing
@@ -170,23 +215,31 @@ export function Background() {
       ctx.fillStyle = base
       ctx.fillRect(0, 0, w, h)
 
+      // Smoothly lerp glow position and intensity based on app mode
+      const currentMode = appModeRef.current
+      const targetYRatio = (currentMode === 'boot' || currentMode === 'idle' || currentMode === 'activating') ? 0.5 : 0.26
+      const targetIntensity = currentMode === 'active' ? 0.15 : 1.0
+      glowYRatio += (targetYRatio - glowYRatio) * 0.025
+      glowIntensity += (targetIntensity - glowIntensity) * 0.03
+
       const glowX = w * 0.5
-      const glowY = h * 0.26
+      const glowY = h * glowYRatio
       const glowPulse = 0.5 + Math.sin(time * 0.85) * 0.5
+      const gi = glowIntensity // shorthand
 
       const upperGlow = ctx.createRadialGradient(glowX, glowY, 0, glowX, glowY, Math.max(w, h) * 0.64)
-      upperGlow.addColorStop(0, rgba(rgb, visual.glow * (0.9 + glowPulse * 0.32)))
-      upperGlow.addColorStop(0.16, rgba(rgb, visual.glow * 0.52))
-      upperGlow.addColorStop(0.38, rgba(rgb, visual.glow * 0.18))
-      upperGlow.addColorStop(0.72, rgba(rgb, visual.glow * 0.05))
+      upperGlow.addColorStop(0, rgba(rgb, visual.glow * (0.9 + glowPulse * 0.32) * gi))
+      upperGlow.addColorStop(0.16, rgba(rgb, visual.glow * 0.52 * gi))
+      upperGlow.addColorStop(0.38, rgba(rgb, visual.glow * 0.18 * gi))
+      upperGlow.addColorStop(0.72, rgba(rgb, visual.glow * 0.05 * gi))
       upperGlow.addColorStop(1, 'rgba(0,0,0,0)')
       ctx.fillStyle = upperGlow
       ctx.fillRect(0, 0, w, h)
 
       const focusedGlow = ctx.createRadialGradient(glowX, glowY, 0, glowX, glowY, Math.min(w, h) * 0.22)
-      focusedGlow.addColorStop(0, rgba('255,255,255', 0.16))
-      focusedGlow.addColorStop(0.22, rgba(rgb, visual.glow * 0.7))
-      focusedGlow.addColorStop(0.64, rgba(rgb, visual.glow * 0.16))
+      focusedGlow.addColorStop(0, rgba('255,255,255', 0.16 * gi))
+      focusedGlow.addColorStop(0.22, rgba(rgb, visual.glow * 0.7 * gi))
+      focusedGlow.addColorStop(0.64, rgba(rgb, visual.glow * 0.16 * gi))
       focusedGlow.addColorStop(1, 'rgba(0,0,0,0)')
       ctx.fillStyle = focusedGlow
       ctx.fillRect(0, 0, w, h)

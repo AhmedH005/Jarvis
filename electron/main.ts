@@ -1,6 +1,24 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import { join } from 'path'
 import { readFile } from 'fs/promises'
+import { readFileSync } from 'fs'
+
+// Load .env from project root (no dotenv dependency needed).
+// Runs synchronously at module load so process.env is populated before any handler fires.
+try {
+  const envPath = join(app.getAppPath(), '.env')
+  for (const line of readFileSync(envPath, 'utf-8').split('\n')) {
+    const t = line.trim()
+    if (!t || t.startsWith('#')) continue
+    const eq = t.indexOf('=')
+    if (eq === -1) continue
+    const key = t.slice(0, eq).trim()
+    const val = t.slice(eq + 1).trim().replace(/^["']|["']$/g, '')
+    if (key && !(key in process.env)) process.env[key] = val
+  }
+} catch { /* .env absent — rely on shell environment */ }
+console.log('[Main] ANTHROPIC_API_KEY loaded:', !!process.env['ANTHROPIC_API_KEY'])
+console.log('[Main] ELEVENLABS_API_KEY loaded:', !!process.env['ELEVENLABS_API_KEY'])
 import { OpenClawBridge } from './openclaw'
 import type { StreamEvent } from './openclaw'
 import {
@@ -33,6 +51,7 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration:  false,
       sandbox:          false,
+      autoplayPolicy:   'no-user-gesture-required',
     },
     titleBarStyle:        'hidden',
     trafficLightPosition: { x: 16, y: 16 },
@@ -162,4 +181,121 @@ function registerIpcHandlers(b: OpenClawBridge): void {
   ipcMain.handle('checker:verifyRun', async (_event, payload) =>
     handleCheckerVerifyRun(payload)
   )
+
+  // ── LLM: stream a response from Claude (Anthropic API) ─────────────────────
+  ipcMain.handle(
+    'llm:send',
+    async (event, { message, history }: {
+      message: string
+      history?: Array<{ role: string; content: string }>
+    }) => {
+      const send = (e: { type: string; payload: string }) => {
+        if (!event.sender.isDestroyed()) event.sender.send('llm:stream', e)
+      }
+
+      const apiKey = process.env['ANTHROPIC_API_KEY']
+      if (!apiKey) {
+        send({ type: 'error', payload: 'ANTHROPIC_API_KEY not set' })
+        return
+      }
+
+      const messages = [...(history ?? []), { role: 'user', content: message }]
+
+      try {
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-6',
+            max_tokens: 1024,
+            stream: true,
+            system: 'You are JARVIS, a sharp and efficient AI assistant. Be concise and direct. No filler words or unnecessary pleasantries.',
+            messages,
+          }),
+        })
+
+        if (!res.ok || !res.body) {
+          const errText = await res.text().catch(() => res.statusText)
+          send({ type: 'error', payload: `Claude API error ${res.status}: ${errText}` })
+          return
+        }
+
+        // Parse Anthropic SSE stream
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() ?? ''
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue
+            const data = line.slice(6).trim()
+            if (!data || data === '[DONE]') continue
+            try {
+              const evt = JSON.parse(data)
+              if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') {
+                send({ type: 'token', payload: evt.delta.text })
+              }
+              if (evt.type === 'message_stop') {
+                send({ type: 'end', payload: '' })
+              }
+            } catch { /* skip malformed SSE data */ }
+          }
+        }
+      } catch (err: unknown) {
+        send({ type: 'error', payload: err instanceof Error ? err.message : String(err) })
+      }
+    }
+  )
+
+  // ── TTS: generate speech via ElevenLabs ──────────────────────────────────────
+  ipcMain.handle('tts:speak', async (_event, { text }: { text: string }) => {
+    console.log('[TTS] ElevenLabs handler called', { textLength: text.length })
+    const apiKey = process.env['ELEVENLABS_API_KEY']
+    if (!apiKey) {
+      console.warn('[TTS] ELEVENLABS_API_KEY not set')
+      return { ok: false, error: 'ELEVENLABS_API_KEY not set' }
+    }
+    const voiceId = process.env['ELEVENLABS_VOICE_ID'] ?? 'pNInz6obpgDQGcFmaJgB'
+    try {
+      const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+        method: 'POST',
+        headers: {
+          'xi-api-key': apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text,
+          model_id: 'eleven_multilingual_v2',
+          voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+        }),
+      })
+      if (!res.ok) {
+        const errorText = await res.text()
+        console.error('[TTS] ElevenLabs API error:', res.status, errorText)
+        return { ok: false, status: res.status, error: errorText }
+      }
+      const audio = Buffer.from(await res.arrayBuffer())
+      console.log('[TTS] ElevenLabs audio generated', { bytes: audio.byteLength })
+      return {
+        ok: true,
+        mimeType: 'audio/mpeg',
+        audioBase64: audio.toString('base64'),
+        bytes: audio.byteLength,
+      }
+    } catch (err) {
+      console.error('[TTS] ElevenLabs fetch error:', err)
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
 }

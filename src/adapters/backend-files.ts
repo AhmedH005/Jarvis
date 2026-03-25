@@ -39,20 +39,16 @@ export const BACKEND_PATHS = {
 
 export type TruthLabel = 'live' | 'partial' | 'blocked' | 'future'
 export type TabId =
-  | 'jarvis'
-  | 'command'
-  | 'agents'
-  | 'memory'
-  | 'time'
-  | 'work'
-  | 'system'
-  | 'research'
+  | 'chat'
+  | 'tasks'
   | 'calendar'
-  | 'financing'
-  | 'misc'
+  | 'automations'
+  | 'dashboard'
+  | 'concierge'
+  | 'coding'
 
 export interface TabMeta {
-  id: TabId
+  id: string
   label: string
   truthLabel: TruthLabel
   sourceLayer: 'official-openclaw' | 'local-extension'
@@ -61,7 +57,7 @@ export interface TabMeta {
 }
 
 export interface DemoSection {
-  id: TabId
+  id: string
   title: string
   status: TruthLabel
   coreCapabilities: string[]
@@ -148,7 +144,7 @@ export interface MemorySnapshot {
 
 export interface DemoSnapshot {
   tabs: TabMeta[]
-  sections: Partial<Record<TabId, DemoSection>>
+  sections: Record<string, DemoSection>
   agents: AgentCardData[]
   agentOperations: AgentOperationalData[]
   weeklySlots: WeeklySlot[]
@@ -212,28 +208,12 @@ function cleanValue(value: string): string {
   return value.replace(/^`|`$/g, '').replace(/^"(.*)"$/, '$1').trim()
 }
 
-function slugifyTabId(label: string): TabId {
-  const slug = label.trim().toLowerCase().replace(/[^\w]+/g, '-').replace(/^-+|-+$/g, '')
-  switch (slug) {
-    case 'jarvis':
-    case 'command':
-    case 'agents':
-    case 'memory':
-    case 'time':
-    case 'work':
-    case 'system':
-    case 'research':
-    case 'calendar':
-    case 'financing':
-    case 'misc':
-      return slug
-    default:
-      return 'jarvis'
-  }
+function slugifyTabId(label: string): string {
+  return label.trim().toLowerCase().replace(/[^\w]+/g, '-').replace(/^-+|-+$/g, '') || 'unknown'
 }
 
 function mergeTabs(primary: TabMeta[], secondary: TabMeta[]): TabMeta[] {
-  const seen = new Set<TabId>()
+  const seen = new Set<string>()
   const merged: TabMeta[] = []
 
   for (const tab of [...primary, ...secondary]) {
@@ -249,7 +229,7 @@ function mergeSections(
   primary: Array<{ title: string; body: string }>,
   secondary: Array<{ title: string; body: string }>
 ): Array<{ title: string; body: string }> {
-  const byId = new Map<TabId, { title: string; body: string }>()
+  const byId = new Map<string, { title: string; body: string }>()
 
   for (const section of [...primary, ...secondary]) {
     byId.set(slugifyTabId(section.title), section)
@@ -590,7 +570,7 @@ function buildFallbackAgentsSection(
       : 'partial'
 
   return {
-    id: 'agents',
+    id: 'agents' as string,
     title: 'Agents',
     status,
     coreCapabilities: [
@@ -631,7 +611,7 @@ function parseDemoSnapshot(
     splitByHeading(localDemoStateExtensionRaw, '## ')
   )
 
-  const parsedSections = topLevelSections.reduce<Partial<Record<TabId, DemoSection>>>((acc, section) => {
+  const parsedSections = topLevelSections.reduce<Record<string, DemoSection>>((acc, section) => {
     const id = slugifyTabId(section.title)
     acc[id] = parseSectionSummary(section.body, section.title)
     return acc
@@ -652,9 +632,9 @@ function parseDemoSnapshot(
     researchRoleRaw: raw.researchRole,
     systemState,
   })
-  const sections: Partial<Record<TabId, DemoSection>> = {
+  const sections: Record<string, DemoSection> = {
     ...parsedSections,
-    agents: parsedSections.agents ?? buildFallbackAgentsSection(runHistory, builderExecutionHistory),
+    agents: parsedSections['agents'] ?? buildFallbackAgentsSection(runHistory, builderExecutionHistory),
   }
 
   return {

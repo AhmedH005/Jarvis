@@ -32,6 +32,11 @@ import type { OpenClawBridge } from './openclaw'
 const planRecords = new Map<string, BuilderPlanBridgeResult>()
 const REQUEST_STORE_VERSION = 1
 const RUN_STORE_VERSION = 1
+let runUpdateNotifier: ((runId: string) => void) | null = null
+
+export function setBuilderRunUpdateNotifier(notify: ((runId: string) => void) | null): void {
+  runUpdateNotifier = notify
+}
 
 interface BuilderExecutionRequestStoreFile {
   version: number
@@ -92,9 +97,23 @@ function readRunStore(): BuilderExecutionRunStoreFile {
     const raw = fs.readFileSync(getRunStorePath(), 'utf8')
     const parsed = JSON.parse(raw) as Partial<BuilderExecutionRunStoreFile>
     if (parsed.version === RUN_STORE_VERSION && parsed.runs && typeof parsed.runs === 'object') {
+      const sanitizedRuns = Object.fromEntries(
+        Object.entries(parsed.runs as Record<string, BuilderExecutionRunRecord>).map(([runId, run]) => [
+          runId,
+          sanitizeStoredRunRecord(run),
+        ])
+      )
+      const mutated = JSON.stringify(sanitizedRuns) !== JSON.stringify(parsed.runs)
+      const store = {
+        version: RUN_STORE_VERSION,
+        runs: sanitizedRuns,
+      }
+      if (mutated) {
+        writeRunStore(store)
+      }
       return {
         version: RUN_STORE_VERSION,
-        runs: parsed.runs as Record<string, BuilderExecutionRunRecord>,
+        runs: sanitizedRuns,
       }
     }
   } catch {}
@@ -136,6 +155,7 @@ function saveRunRecord(record: BuilderExecutionRunRecord): BuilderExecutionRunRe
   const store = readRunStore()
   store.runs[record.runId] = record
   writeRunStore(store)
+  runUpdateNotifier?.(record.runId)
   return record
 }
 
@@ -335,6 +355,188 @@ function buildTaskSummary(taskPrompt: string): string {
   return `Scope a plan-only Builder task for "${taskPrompt}" inside ${BUILDER_REPO_SCOPE}, returning a truthful plan record without starting execution.`
 }
 
+function parseAgentCompletion(text: string): {
+  outcome: 'completed' | 'failed' | 'blocked'
+  summary: string
+  filesChanged: string[]
+  commandsRun: string[]
+  verificationStatus: 'passed' | 'failed' | 'not-run'
+  verificationSummary?: string
+} | null {
+  const match = text.match(/===JARVIS_RESULT===\s*([\s\S]*?)\s*===JARVIS_RESULT_END===/)
+  if (!match) return null
+
+  try {
+    const raw = JSON.parse(match[1].trim()) as Record<string, unknown>
+    const outcome = raw.outcome === 'completed' || raw.outcome === 'failed' || raw.outcome === 'blocked'
+      ? raw.outcome
+      : 'completed'
+    const summary = typeof raw.summary === 'string' && raw.summary.trim()
+      ? raw.summary.trim()
+      : 'Builder run completed.'
+    const filesChanged = normalizeReportedFiles(raw.filesChanged).ok
+      ? normalizeReportedFiles(raw.filesChanged).files
+      : []
+    const commandsRun = normalizeStringList(raw.commandsRun, 25)
+    const verificationStatus = raw.verificationStatus === 'passed' || raw.verificationStatus === 'failed'
+      ? raw.verificationStatus
+      : 'not-run'
+    const verificationSummary = typeof raw.verificationSummary === 'string' && raw.verificationSummary.trim()
+      ? raw.verificationSummary.trim()
+      : undefined
+
+    return { outcome, summary, filesChanged, commandsRun, verificationStatus, verificationSummary }
+  } catch {
+    return null
+  }
+}
+
+function hasValidationEvidence(commandsRun: string[]): boolean {
+  return commandsRun.some((command) =>
+    /\b(typecheck|build|test|vitest|jest|playwright|cypress|lint)\b/i.test(command)
+  )
+}
+
+function getCompletionContractIssues(
+  outcome: 'completed' | 'failed' | 'blocked',
+  filesChanged: string[],
+  commandsRun: string[],
+  verificationStatus: 'passed' | 'failed' | 'not-run'
+): string[] {
+  if (outcome !== 'completed') return []
+
+  const issues: string[] = []
+  if (filesChanged.length === 0) {
+    issues.push('completed outcome was reported without any recorded file edits')
+  }
+  if (commandsRun.length === 0) {
+    issues.push('completed outcome was reported without any recorded validation commands')
+  } else if (!hasValidationEvidence(commandsRun)) {
+    issues.push('completed outcome was reported without a recognizable validation command')
+  }
+  if (verificationStatus === 'not-run') {
+    issues.push('completed outcome was reported with verificationStatus "not-run"')
+  }
+
+  return issues
+}
+
+function sanitizeStoredRunRecord(run: BuilderExecutionRunRecord): BuilderExecutionRunRecord {
+  if (run.executionState !== 'completed') return run
+
+  const filesChanged = normalizeReportedFiles(run.filesChanged).ok ? normalizeReportedFiles(run.filesChanged).files : []
+  const commandsRun = normalizeStringList(run.commandsRun, 25)
+  const verificationStatus = run.verificationStatus ?? 'not-run'
+  const issues = getCompletionContractIssues('completed', filesChanged, commandsRun, verificationStatus)
+  if (issues.length === 0) return run
+
+  return {
+    ...run,
+    executionState: 'failed',
+    summary: `Builder run violated the completion contract: ${issues.join('; ')}.`,
+    filesChanged,
+    commandsRun,
+    verificationStatus: 'failed',
+    verificationSummary: run.verificationSummary || 'This stored run was downgraded because it did not include grounded completion evidence.',
+    note: `${run.note} Stored run was downgraded to failed because it claimed completion without the required edit/validation evidence.`,
+  }
+}
+
+const finalizingRuns = new Set<string>()
+
+function autoFinalizeRun(runId: string, text: string, completionState: 'final' | 'aborted' | 'error'): void {
+  if (finalizingRuns.has(runId)) return
+  finalizingRuns.add(runId)
+  void autoFinalizeRunAsync(runId, text, completionState).finally(() => {
+    finalizingRuns.delete(runId)
+  })
+}
+
+async function autoFinalizeRunAsync(
+  runId: string,
+  text: string,
+  completionState: 'final' | 'aborted' | 'error'
+): Promise<void> {
+  const existing = getRunRecord(runId)
+  if (!existing || existing.executionState !== 'started') return
+
+  const finishedAt = new Date().toISOString()
+  if (completionState !== 'final') {
+    saveRunRecord({
+      ...existing,
+      executionState: 'failed',
+      finishedAt,
+      summary: completionState === 'aborted' ? 'Builder run was aborted.' : 'Builder run encountered an error.',
+      filesChanged: [],
+      commandsRun: [],
+      verificationStatus: 'failed',
+      verificationSummary: completionState === 'aborted'
+        ? 'The detached Builder run was aborted before it produced a grounded completion report.'
+        : 'The detached Builder run ended with an error before it produced a grounded completion report.',
+      note: `${existing.note} Auto-finalized as failed (${completionState}).`,
+    })
+    return
+  }
+
+  const parsed = parseAgentCompletion(text)
+  const fallbackSummary = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-3)
+    .join(' ')
+    .slice(0, 300) || 'Builder run completed.'
+
+  if (!parsed) {
+    saveRunRecord({
+      ...existing,
+      executionState: 'failed',
+      finishedAt,
+      summary: 'Builder run ended without the required structured completion report.',
+      filesChanged: [],
+      commandsRun: [],
+      verificationStatus: 'failed',
+      verificationSummary: `The Builder run did not emit the mandatory JARVIS_RESULT block. Last visible summary: ${fallbackSummary}`,
+      note: `${existing.note} Auto-finalized as failed because the structured completion report was missing.`,
+    })
+    return
+  }
+
+  const issues = getCompletionContractIssues(
+    parsed.outcome,
+    parsed.filesChanged,
+    parsed.commandsRun,
+    parsed.verificationStatus
+  )
+
+  if (issues.length > 0) {
+    saveRunRecord({
+      ...existing,
+      executionState: 'failed',
+      finishedAt,
+      summary: `Builder run violated the completion contract: ${issues.join('; ')}.`,
+      filesChanged: parsed.filesChanged,
+      commandsRun: parsed.commandsRun,
+      verificationStatus: 'failed',
+      verificationSummary: parsed.verificationSummary || 'The Builder run did not provide the required grounded completion evidence.',
+      note: `${existing.note} Auto-finalized as failed because the structured completion report did not satisfy the Builder contract.`,
+    })
+    return
+  }
+
+  saveRunRecord({
+    ...existing,
+    executionState: parsed.outcome,
+    finishedAt,
+    summary: parsed.summary,
+    filesChanged: parsed.filesChanged,
+    commandsRun: parsed.commandsRun,
+    verificationStatus: parsed.verificationStatus,
+    verificationSummary: parsed.verificationSummary,
+    note: `${existing.note} Auto-finalized from agent completion report.`,
+  })
+}
+
 function buildExecutionRequestSummary(taskSummary: string): string {
   return `Approval-gated request to implement the scoped Builder plan: ${taskSummary}`
 }
@@ -363,7 +565,7 @@ function deriveRemediationLikelyFiles(
   return merged.ok ? merged.files.slice(0, 5) : []
 }
 
-function buildExecutionStartPrompt(request: BuilderExecutionRequestRecord): string {
+function buildExecutionStartPrompt(request: BuilderExecutionRequestRecord, runId: string): string {
   const likelyFiles = request.likelyFiles.length > 0
     ? `Likely files/work area: ${request.likelyFiles.join(', ')}.`
     : 'Likely files/work area were not scoped tightly enough to list honestly yet.'
@@ -372,6 +574,7 @@ function buildExecutionStartPrompt(request: BuilderExecutionRequestRecord): stri
   return [
     'Builder Agent execution start.',
     `Repo root: ${BUILDER_REPO_SCOPE}.`,
+    `Run id: ${runId}.`,
     `Approved request id: ${request.requestId}.`,
     `Approved task summary: ${request.summary}.`,
     `Work target: ${target.targetLabel}.`,
@@ -381,7 +584,14 @@ function buildExecutionStartPrompt(request: BuilderExecutionRequestRecord): stri
     `Allowed scope: inspect and modify files only inside ${BUILDER_REPO_SCOPE}.`,
     'Allowed verification: repo-local checks only when relevant to the scoped task.',
     'Disallowed: scope expansion, destructive operations, dependency installs, external changes, secrets handling, machine-wide mutation, or implied Checker flow.',
-    'Report completion or blockers truthfully when the run stops.',
+    'Default workflow: INSPECT -> EDIT -> VALIDATE -> FIX -> REPORT.',
+    'Do not stop at planning notes, execution requests, handoff prompts, or "next I would..." summaries.',
+    'For outcome "completed", you must have actually edited files and run real validation commands.',
+    'If unrelated repo debt blocks validation, explain that exactly in verificationSummary instead of pretending success.',
+    'When all work is done, output this JSON block as the very last thing you write:',
+    '===JARVIS_RESULT===',
+    '{"outcome":"completed","summary":"what was implemented","filesChanged":["relative/path"],"commandsRun":["npm run typecheck"],"verificationStatus":"passed","verificationSummary":"exact validation result"}',
+    '===JARVIS_RESULT_END===',
   ].join('\n')
 }
 
@@ -980,7 +1190,7 @@ export async function handleBuilderStartExecution(
   }
 
   try {
-    const { runId } = await bridge.startDetachedMessage(buildExecutionStartPrompt(request), requestId)
+    const runId = createRecordId('brun')
     const target = resolveWorkTarget(request.target, request.likelyFiles)
 
     const result: BuilderExecutionStartResult = {
@@ -995,10 +1205,18 @@ export async function handleBuilderStartExecution(
       source: 'real-bridge',
       sourceLabel: 'real bridge',
       startedAt: new Date().toISOString(),
-      note: 'Approved Builder execution run started for the Jarvis repo. Completion, blockers, streaming, and verification are not implied by this response.',
+      note: 'Approved Builder execution run queued for the Jarvis repo. Actual dispatch will happen as soon as a scheduler slot is available.',
     }
 
     saveRunRecord(toStoredRunRecord(result))
+
+    await bridge.startDetachedMessage(
+      buildExecutionStartPrompt(request, runId),
+      requestId,
+      (text, state) => autoFinalizeRun(runId, text, state),
+      'coding'  // route to the dedicated coding agent (Steve)
+    )
+
     return result
   } catch (error) {
     return buildBlockedExecutionStartResult(
@@ -1091,6 +1309,18 @@ export function handleBuilderFinalizeExecution(
 
   const commandsRun = normalizeStringList(payload.commandsRun, 25)
   const verificationSummary = normalizePrompt(String(payload.verificationSummary ?? '')) || undefined
+
+  if (payload.outcome === 'completed') {
+    const contractIssues = getCompletionContractIssues('completed', normalizedFiles.files, commandsRun, verificationStatus)
+    if (contractIssues.length > 0) {
+      return buildBlockedExecutionFinalizeResult(
+        runId,
+        `Builder bridge blocked execution finalization because the completion contract was violated: ${contractIssues.join('; ')}. Report the true outcome (failed or blocked) instead.`,
+        run
+      )
+    }
+  }
+
   const finishedAt = new Date().toISOString()
   const note = `Builder execution run finalized as ${payload.outcome} by the real bridge. Verification status is recorded as ${verificationStatus}. Checker verification is not implied by this result report.`
   const target = resolveWorkTarget(run.target, normalizedFiles.files)

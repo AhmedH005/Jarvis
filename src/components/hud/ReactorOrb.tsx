@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useJarvisStore } from '@/store/jarvis'
+import { useVoiceStore } from '@/store/voice'
 import type { StreamPhase } from '@/types'
 
 type PhaseVisual = {
@@ -35,14 +36,19 @@ function rgba(rgb: string, alpha: number) { return `rgba(${rgb},${Math.max(0, Ma
 
 export function ReactorOrb({
   size = 260,
+  activating = false,
+  showLabel = true,
 }: {
   size?: number
+  activating?: boolean
+  showLabel?: boolean
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const streamPhase = useJarvisStore((s) => s.streamPhase)
   const ocStatus = useJarvisStore((s) => s.ocStatus)
   const reactorVisualLive = useJarvisStore((s) => s.reactorVisualLive)
   const setReactorVisualLive = useJarvisStore((s) => s.setReactorVisualLive)
+  const voicePhase = useVoiceStore((s) => s.voicePhase)
   const [hovered, setHovered] = useState(false)
   const [burstNonce, setBurstNonce] = useState(0)
   const [focusPulse, setFocusPulse] = useState(false)
@@ -55,13 +61,18 @@ export function ReactorOrb({
 
   const phaseRef = useRef<StreamPhase>('idle')
   phaseRef.current = streamPhase
+  const voicePhaseRef = useRef(voicePhase)
+  voicePhaseRef.current = voicePhase
   const hoveredRef = useRef(false)
   hoveredRef.current = hovered
+  const activatingRef = useRef(false)
+  activatingRef.current = activating
 
   const anim = useRef({
     outerAngle: 0, midAngle: 0, innerAngle: 0, time: 0,
     particles: [] as Particle[],
     hoverAlpha: 0,           // 0 = no hover, 1 = full hover
+    activateTime: 0,         // tracks activation progress in seconds
     // interpolated visuals
     cr: BOOTING.r, cg: BOOTING.g, cb: BOOTING.b,
     cPulse: BOOTING.pulseSec, cRing: BOOTING.ringSpeed,
@@ -74,14 +85,15 @@ export function ReactorOrb({
   const handleClick = useCallback(() => {
     setHovered(false)
     setBurstNonce((value) => value + 1)
-    setReactorVisualLive(true)
+    // Don't setReactorVisualLive here — let the activation flow in App.tsx
+    // control the color transition timing for a smooth orange→blue shift
     setFocusPulse(true)
     if (focusTimerRef.current) window.clearTimeout(focusTimerRef.current)
     focusTimerRef.current = window.setTimeout(() => {
       setFocusPulse(false)
       focusTimerRef.current = null
     }, 720)
-  }, [setReactorVisualLive])
+  }, [])
 
   useEffect(() => {
     return () => {
@@ -105,11 +117,56 @@ export function ReactorOrb({
     const draw = () => {
       const a = anim.current
       const online = onlineRef.current
-      const target: PhaseVisual = visualLiveRef.current
-        ? (ocStatus.online ? PHASES[phaseRef.current] : PHASES.idle)
-        : BOOTING
-      const sp = online ? 0.06 : 0.04
+      const isActivating = activatingRef.current
+      let target: PhaseVisual
+      let sp: number
       const hoverTarget = !online && hoveredRef.current ? 1 : 0
+
+      if (isActivating) {
+        // Track activation progress (0→4 seconds)
+        a.activateTime = Math.min(a.activateTime + 1 / 60, 4.2)
+        const progress = Math.min(a.activateTime / 4.0, 1.0)
+
+        // Color cycling: orange(0) → white-hot(0.3) → cyan(0.6) → blue(1.0)
+        let tr: number, tg: number, tb: number
+        if (progress < 0.3) {
+          const t = progress / 0.3
+          tr = lerp(255, 255, t); tg = lerp(110, 245, t); tb = lerp(40, 220, t)
+        } else if (progress < 0.6) {
+          const t = (progress - 0.3) / 0.3
+          tr = lerp(255, 50, t); tg = lerp(245, 238, t); tb = lerp(220, 255, t)
+        } else {
+          const t = (progress - 0.6) / 0.4
+          tr = lerp(50, 0, t); tg = lerp(238, 212, t); tb = 255
+        }
+
+        // Ring speed ramps up dramatically then settles
+        const ringMult = 1 + 16 * Math.sin(progress * Math.PI)
+
+        target = {
+          r: tr, g: tg, b: tb,
+          pulseSec: lerp(2.5, 0.18, progress),
+          ringSpeed: 0.18 + ringMult * 0.32,
+          particleRate: lerp(0.03, 0.7, progress),
+          ambient: lerp(0.38, 1.0, progress),
+          bloom: lerp(0.44, 1.2, progress),
+          core: lerp(0.55, 1.3, progress),
+          flare: lerp(0.08, 0.9, progress),
+        }
+        sp = 0.14
+      } else {
+        a.activateTime = 0
+        // Voice state overrides stream phase visuals for immediate feedback
+        const vp = voicePhaseRef.current
+        const effectivePhase: StreamPhase =
+          vp === 'speaking'  ? 'streaming' :
+          vp === 'listening' ? 'start' :
+          phaseRef.current
+        target = visualLiveRef.current
+          ? (ocStatus.online ? PHASES[effectivePhase] : PHASES.idle)
+          : BOOTING
+        sp = online ? 0.06 : 0.04
+      }
 
       a.cr = lerp(a.cr, target.r, sp);   a.cg = lerp(a.cg, target.g, sp);   a.cb = lerp(a.cb, target.b, sp)
       a.cPulse    = lerp(a.cPulse,    target.pulseSec,    sp)
@@ -175,7 +232,7 @@ export function ReactorOrb({
 
       ctx.strokeStyle = rgba(rgb, 0.72 + pulse * 0.24)
       ctx.lineWidth = 3.4; ctx.lineCap = 'round'
-      ctx.shadowColor = rgba(rgb, 0.88); ctx.shadowBlur = 24
+      ctx.shadowColor = rgba(rgb, 0.88); ctx.shadowBlur = 10
       ctx.beginPath(); ctx.arc(0, 0, R - 3, -0.78, 2.14); ctx.stroke()
 
       ctx.strokeStyle = rgba(rgb, 0.32 + pulse * 0.12); ctx.lineWidth = 1.6
@@ -201,7 +258,7 @@ export function ReactorOrb({
       ctx.strokeStyle = rgba(rgb, 0.16); ctx.lineWidth = 1
       ctx.beginPath(); ctx.arc(0, 0, midR, 0, Math.PI * 2); ctx.stroke()
       ctx.strokeStyle = rgba(rgb, 0.52 + pulse * 0.18); ctx.lineWidth = 2; ctx.lineCap = 'round'
-      ctx.shadowColor = rgba(rgb, 0.6); ctx.shadowBlur = 12
+      ctx.shadowColor = rgba(rgb, 0.6); ctx.shadowBlur = 6
       ctx.beginPath(); ctx.arc(0, 0, midR, 0.25, 1.9); ctx.stroke()
       ctx.shadowBlur = 0
       for (let i = 0; i < 6; i++) {
@@ -218,7 +275,7 @@ export function ReactorOrb({
       ctx.strokeStyle = rgba(rgb, 0.18); ctx.lineWidth = 1
       ctx.beginPath(); ctx.arc(0, 0, innerR, 0, Math.PI * 2); ctx.stroke()
       ctx.strokeStyle = rgba(rgb, 0.64 + pulse * 0.22); ctx.lineWidth = 2.2; ctx.lineCap = 'round'
-      ctx.shadowColor = rgba(rgb, 0.72); ctx.shadowBlur = 10
+      ctx.shadowColor = rgba(rgb, 0.72); ctx.shadowBlur = 5
       ctx.beginPath(); ctx.arc(0, 0, innerR, -0.24, 1.44); ctx.stroke()
       ctx.shadowBlur = 0
       ctx.restore()
@@ -242,7 +299,7 @@ export function ReactorOrb({
       coreGrad.addColorStop(0.58, rgba(rgb, 0.5 * a.cCore))
       coreGrad.addColorStop(0.86, rgba(rgb, 0.18 * a.cCore))
       coreGrad.addColorStop(1, 'rgba(0,0,0,0)')
-      ctx.shadowColor = rgba(rgb, 0.96); ctx.shadowBlur = 78
+      ctx.shadowColor = rgba(rgb, 0.96); ctx.shadowBlur = 28
       ctx.fillStyle = coreGrad
       ctx.beginPath(); ctx.arc(center, center, liveR, 0, Math.PI * 2); ctx.fill()
       ctx.shadowBlur = 0
@@ -280,7 +337,7 @@ export function ReactorOrb({
         const lr = p.life / p.maxLife
         const al = lr < 0.18 ? lr / 0.18 : 1 - (lr - 0.18) / 0.82
         ctx.fillStyle = rgba(rgb, al * 0.88)
-        ctx.shadowColor = rgba(rgb, al * 0.72); ctx.shadowBlur = 12
+        ctx.shadowColor = rgba(rgb, al * 0.72); ctx.shadowBlur = 4
         ctx.beginPath(); ctx.arc(p.x, p.y, p.size * (1 - lr * 0.38), 0, Math.PI * 2); ctx.fill()
         ctx.shadowBlur = 0
         return true
@@ -295,12 +352,12 @@ export function ReactorOrb({
 
   const online = reactorVisualLive
   const booting = !reactorVisualLive
-  const clickable = true
-  const labelColor = online ? '#7ef4ff' : '#ff9a54'
+  const burstIds = [0, 1, 2, 3]
+
+  // Use CSS-only gradient — framer-motion can't interpolate gradient strings
   const shellGlow = online
     ? 'radial-gradient(circle, rgba(88,244,255,0.34) 0%, rgba(0,212,255,0.14) 34%, rgba(0,0,0,0) 72%)'
     : 'radial-gradient(circle, rgba(255,160,86,0.34) 0%, rgba(255,110,40,0.14) 34%, rgba(0,0,0,0) 72%)'
-  const burstIds = [0, 1, 2, 3]
 
   return (
     <div
@@ -309,9 +366,10 @@ export function ReactorOrb({
         width: size,
         height: size,
         overflow: 'visible',
-        cursor: clickable ? 'pointer' : 'default',
+        cursor: 'pointer',
       }}
     >
+      {/* Outer glow shell — uses CSS transition for gradient crossfade */}
       <motion.div
         aria-hidden
         className="pointer-events-none absolute rounded-full"
@@ -322,7 +380,7 @@ export function ReactorOrb({
           top: -size * 0.45,
           background: shellGlow,
           filter: 'blur(16px)',
-          opacity: online ? 1 : hovered ? 1 : 0.72,
+          transition: 'background 1.8s ease',
         }}
         animate={online
           ? { scale: focusPulse ? [1, 1.1, 1.03] : [1, 1.05, 1], opacity: [0.78, 1, 0.78] }
@@ -346,26 +404,31 @@ export function ReactorOrb({
         }}
       />
 
-      {!online && (
-        <motion.div
-          aria-hidden
-          className="pointer-events-none absolute rounded-full"
-          style={{
-            width: size * 0.98,
-            height: size * 0.98,
-            left: size * 0.01,
-            top: size * 0.01,
-            border: '1.5px dashed rgba(255,156,86,0.74)',
-            boxShadow: hovered ? '0 0 28px rgba(255,138,74,0.42)' : '0 0 14px rgba(255,138,74,0.18)',
-          }}
-          animate={hovered
+      {/* Dashed activation ring — fades out when online */}
+      <motion.div
+        aria-hidden
+        className="pointer-events-none absolute rounded-full"
+        style={{
+          width: size * 0.98,
+          height: size * 0.98,
+          left: size * 0.01,
+          top: size * 0.01,
+          border: '1.5px dashed rgba(255,156,86,0.74)',
+          boxShadow: hovered ? '0 0 28px rgba(255,138,74,0.42)' : '0 0 14px rgba(255,138,74,0.18)',
+        }}
+        animate={online
+          ? { opacity: 0, scale: 1 }
+          : hovered
             ? { opacity: [0.34, 0.96, 0.34], scale: [1, 1.04, 1] }
             : { opacity: 0.16, scale: 1 }
-          }
-          transition={{ duration: 1.05, repeat: Infinity, ease: 'easeInOut' }}
-        />
-      )}
+        }
+        transition={online
+          ? { duration: 1.2, ease: 'easeOut' }
+          : { duration: 1.05, repeat: Infinity, ease: 'easeInOut' }
+        }
+      />
 
+      {/* Burst rings on click */}
       <AnimatePresence>
         {focusPulse && burstIds.map((id) => (
           <motion.div
@@ -380,7 +443,7 @@ export function ReactorOrb({
               marginLeft: -size * 0.26,
               marginTop: -size * 0.26,
               border: '2px solid rgba(255,255,255,0.95)',
-              boxShadow: online ? '0 0 18px rgba(120,232,255,0.45)' : '0 0 18px rgba(255,255,255,0.35)',
+              boxShadow: '0 0 18px rgba(255,255,255,0.35)',
             }}
             initial={{ scale: 0.42, opacity: 0.96 }}
             animate={{ scale: 2.3 + id * 0.26, opacity: 0 }}
@@ -390,10 +453,11 @@ export function ReactorOrb({
         ))}
       </AnimatePresence>
 
+      {/* Interactive hit zone */}
       <div
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
-        onClick={clickable ? handleClick : undefined}
+        onClick={handleClick}
         style={{
           position: 'absolute',
           width: size * 0.75,
@@ -401,29 +465,33 @@ export function ReactorOrb({
           left: size * 0.125,
           top: size * 0.125,
           borderRadius: '50%',
-          cursor: clickable ? 'pointer' : 'default',
+          cursor: 'pointer',
           zIndex: 10,
         }}
       />
 
-      <motion.p
-        className="pointer-events-none absolute left-1/2 font-mono text-[11px] tracking-[0.32em]"
-        style={{
-          top: size + 10,
-          transform: 'translateX(-50%)',
-          color: labelColor,
-          textShadow: online ? '0 0 12px rgba(0,212,255,0.45)' : '0 0 12px rgba(255,138,74,0.45)',
-        }}
-        animate={online
-          ? { opacity: [0.72, 1, 0.72] }
-          : booting
-            ? { opacity: [0.52, 0.92, 0.52] }
-            : { opacity: [0.44, 0.92, 0.44] }
-        }
-        transition={{ duration: online ? 1.8 : 1.4, repeat: Infinity, ease: 'easeInOut' }}
-      >
-        {online ? 'ONLINE' : 'OFFLINE'}
-      </motion.p>
+      {/* Status label */}
+      {showLabel && (
+        <motion.p
+          className="pointer-events-none absolute left-1/2 font-mono text-[11px] tracking-[0.32em] whitespace-nowrap"
+          style={{
+            top: size + 10,
+            transform: 'translateX(-50%)',
+            color: online ? '#7ef4ff' : '#ff9a54',
+            textShadow: online ? '0 0 12px rgba(0,212,255,0.45)' : '0 0 12px rgba(255,138,74,0.45)',
+            transition: 'color 1.8s ease, text-shadow 1.8s ease',
+          }}
+          animate={online
+            ? { opacity: [0.72, 1, 0.72] }
+            : booting
+              ? { opacity: [0.52, 0.92, 0.52] }
+              : { opacity: [0.44, 0.92, 0.44] }
+          }
+          transition={{ duration: online ? 1.8 : 1.4, repeat: Infinity, ease: 'easeInOut' }}
+        >
+          {online ? 'ONLINE' : 'SYSTEM OFFLINE'}
+        </motion.p>
+      )}
     </div>
   )
 }

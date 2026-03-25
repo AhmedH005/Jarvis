@@ -839,7 +839,7 @@ const WORKFLOWS: Workflow[] = [
     body:  'Work already started. Inspect queue, activity feed, and run detail.',
     route: 'System → queue · history · run detail',
     color: '#00ff88',
-    tab:   'system',
+    tab:   'coding',
   },
 ]
 

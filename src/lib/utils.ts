@@ -28,6 +28,28 @@ export function nanoid(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 }
 
+type LegacyTtsSpeakResult =
+  | ArrayBuffer
+  | Uint8Array
+  | {
+      type: 'Buffer'
+      data: number[]
+    }
+
+type TtsSpeakResult =
+  | LegacyTtsSpeakResult
+  | {
+      ok: true
+      mimeType: string
+      audioBase64: string
+      bytes: number
+    }
+  | {
+      ok: false
+      error: string
+      status?: number
+    }
+
 /** Declare the window.jarvis API exposed by the Electron preload */
 declare global {
   interface Window {
@@ -73,6 +95,16 @@ declare global {
       }
       checker: {
         verifyRun: (input: CheckerVerifyRunInput) => Promise<CheckerVerifyRunResult>
+      }
+      llm: {
+        send: (
+          message: string,
+          history?: Array<{ role: string; content: string }>
+        ) => Promise<void>
+        onStream: (cb: (event: { type: string; payload: string }) => void) => (() => void)
+      }
+      tts: {
+        speak: (text: string) => Promise<TtsSpeakResult | null>
       }
     }
   }

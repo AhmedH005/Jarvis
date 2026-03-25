@@ -1,353 +1,358 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { AlertTriangle, RefreshCw, Shield, Workflow } from 'lucide-react'
-import { loadDemoSnapshot, refreshBackendFiles } from '@/adapters/backend-files'
-import type { DemoSnapshot, TabId, TabMeta } from '@/adapters/backend-files'
-import { useMissionHandoffStore } from '@/store/mission-handoff'
+import { Code2, MessageSquare } from 'lucide-react'
+import { loadBuilderExecutionHistory, type BuilderExecutionHistorySnapshot } from '@/adapters/builder-execution'
+import { EMPTY_RUN_HISTORY } from '@/adapters/run-history'
+import { useJarvisStore } from '@/store/jarvis'
+import { ReactorOrb } from '@/components/hud/ReactorOrb'
+import { HudCornerPanel, PanelRow } from '@/components/hud/HudCornerPanel'
+import { MessageList } from '@/components/chat/MessageList'
+import { InputBar } from '@/components/chat/InputBar'
+import { getReactorDisplayStatus } from '@/lib/reactor-display'
 import { TabNav } from './TabNav'
-import { TruthBadge } from './TruthBadge'
-import { JarvisHomeTab } from './JarvisHomeTab'
-import { AgentsTab } from './AgentsTab'
-import { MemoryTab } from './MemoryTab'
-import { TimeTab } from './TimeTab'
-import { WorkTab } from './WorkTab'
-import { SystemTab } from './SystemTab'
-import { ResearchTab } from './ResearchTab'
-import { CalendarTab } from './CalendarTab'
-import { FinancingTab } from './FinancingTab'
-import { MiscTab } from './MiscTab'
-import { CommandCenterTab } from './CommandCenterTab'
 import { CommandPalette } from './CommandPalette'
+import { AgentsTab } from './AgentsTab'
+import { TasksTab } from './TasksTab'
+import { NewCalendarTab } from './NewCalendarTab'
+import { AutomationsTab } from './AutomationsTab'
+import { DashboardTab } from './DashboardTab'
+import { ConciergeTab } from './ConciergeTab'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
+import type { TabId } from '@/adapters/backend-files'
+
+const CODING_SECTION = { id: 'coding', title: 'Coding Team', status: 'partial' as const, coreCapabilities: [], blockedCapabilities: [], recommendedUiContent: [], warningLabels: [] }
+
+type CenterMode = 'chat' | 'code'
+
+// Bouncy spring presets for futuristic entrance animations
+const SPRING_SNAPPY = { type: 'spring' as const, stiffness: 300, damping: 22, mass: 0.8 }
+const SPRING_BOUNCY = { type: 'spring' as const, stiffness: 260, damping: 20, mass: 0.9 }
+const SPRING_SOFT   = { type: 'spring' as const, stiffness: 180, damping: 18, mass: 1.0 }
 
 export function TabShell() {
-  const [snapshot, setSnapshot] = useState<DemoSnapshot | null>(null)
-  const [activeTab, setActiveTab] = useState<TabId>('jarvis')
-  const [refreshing, setRefreshing] = useState(false)
+  const [activeTab, setActiveTab] = useState<TabId>('chat')
+  const [centerMode, setCenterMode] = useState<CenterMode>('chat')
 
-  // ── Handoff navigation ─────────────────────────────────────────────────────
-  const handoffNavTarget    = useMissionHandoffStore(s => s.navigationTarget)
-  const clearHandoffNav     = useMissionHandoffStore(s => s.clearNavigation)
+  function handleTabChange(id: TabId) {
+    setActiveTab(id)
+    if (id === 'coding') setCenterMode('code')
+  }
+
+  const showModeToggle = activeTab === 'chat'
+
+  return (
+    <div className="flex flex-1 min-h-0 overflow-hidden">
+      <CommandPalette />
+
+      {/* Column 1: Tab navigation — springs in from left */}
+      <motion.div
+        initial={{ x: -120, opacity: 0 }}
+        animate={{ x: 0, opacity: 1 }}
+        transition={{ ...SPRING_BOUNCY, delay: 0.1 }}
+      >
+        <TabNav activeTab={activeTab} onTabChange={handleTabChange} />
+      </motion.div>
+
+      {/* Column 2: Jarvis sidebar — scales up with bounce */}
+      <motion.div
+        className="flex-shrink-0"
+        initial={{ opacity: 0, scale: 0.92 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ ...SPRING_SOFT, delay: 0.18 }}
+      >
+        <JarvisSidebar />
+      </motion.div>
+
+      {/* Column 3: Main content — springs in from right */}
+      <motion.div
+        className="flex min-w-0 flex-1 flex-col overflow-hidden"
+        initial={{ x: 60, opacity: 0 }}
+        animate={{ x: 0, opacity: 1 }}
+        transition={{ ...SPRING_BOUNCY, delay: 0.25 }}
+      >
+        {showModeToggle && (
+          <motion.div
+            className="flex items-center px-4 py-2.5 flex-shrink-0"
+            style={{
+              borderBottom: '1px solid rgba(0,212,255,0.08)',
+              background: 'linear-gradient(180deg, rgba(7,14,23,0.7), rgba(7,14,23,0.2))',
+            }}
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ type: 'spring', stiffness: 300, damping: 24, delay: 0.35 }}
+          >
+            <ModeToggle mode={centerMode} onSwitch={setCenterMode} />
+          </motion.div>
+        )}
+
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={activeTab === 'chat' ? `chat-${centerMode}` : activeTab}
+              className="h-full"
+              initial={{ opacity: 0, y: 10, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+            >
+              {activeTab === 'chat' && centerMode === 'chat' && <ChatView />}
+              {activeTab === 'chat' && centerMode === 'code' && (
+                <ErrorBoundary><CodingTeamLoader /></ErrorBoundary>
+              )}
+              {activeTab === 'tasks' && (
+                <ErrorBoundary><TasksTab /></ErrorBoundary>
+              )}
+              {activeTab === 'calendar' && (
+                <ErrorBoundary><NewCalendarTab /></ErrorBoundary>
+              )}
+              {activeTab === 'automations' && (
+                <ErrorBoundary><AutomationsTab /></ErrorBoundary>
+              )}
+              {activeTab === 'dashboard' && (
+                <ErrorBoundary><DashboardTab /></ErrorBoundary>
+              )}
+              {activeTab === 'concierge' && (
+                <ErrorBoundary><ConciergeTab /></ErrorBoundary>
+              )}
+              {activeTab === 'coding' && (
+                <ErrorBoundary><CodingTeamLoader /></ErrorBoundary>
+              )}
+            </motion.div>
+          </AnimatePresence>
+        </div>
+      </motion.div>
+    </div>
+  )
+}
+
+// ── Coding Team loader ──────────────────────────────────────────────────────────
+
+function CodingTeamLoader() {
+  const [history, setHistory] = useState<BuilderExecutionHistorySnapshot | null>(null)
 
   useEffect(() => {
-    if (handoffNavTarget === 'agents') {
-      setActiveTab('agents')
-      clearHandoffNav()
-    }
-  }, [handoffNavTarget, clearHandoffNav])
-
-  useEffect(() => {
-    void loadDemoSnapshot()
-      .then((data) => {
-        setSnapshot(data)
-        if (data.tabs.length > 0) setActiveTab(data.tabs[0].id)
-      })
-      .catch((error: unknown) => {
-        console.error('[JARVIS] loadDemoSnapshot failed unexpectedly:', error)
-        setSnapshot({
-          tabs: [],
-          sections: {},
-          agents: [],
-          agentOperations: [],
-          weeklySlots: [],
-          candidateBlocks: [],
-          workLedger: {
-            rules: [],
-            schoolGap: 'No data loaded.',
-            businessGap: 'No data loaded.',
-            items: [],
-          },
-          decisions: [],
-          systemState: [],
-          researchState: [],
-          calendarState: [],
-          memory: {
-            stateLines: [],
-            recentSummary: [],
-            decisions: [],
-            dailyMemoryExists: false,
-            dailyMemoryPath: '',
-          },
-          runHistory: {
-            runs: [],
-            source: 'local-demo-fallback',
-            sourceLabel: 'local demo',
-            sourcePath: 'jarvis-local-demo/run-history.md',
-            note: 'Run history could not be loaded.',
-          },
-          builderExecutionHistory: {
-            scope: '/Users/ahmedh005/Jarvis',
-            entries: [],
-            source: 'local-demo-fallback',
-            sourceLabel: 'shell-catch',
-            status: 'blocked',
-            note: 'Builder execution history could not be loaded.',
-          },
-          refreshedAt: new Date().toISOString(),
-          errors: [error instanceof Error ? error.message : 'Shell snapshot failed to load'],
-        })
-      })
+    void loadBuilderExecutionHistory().then(setHistory)
+    const id = setInterval(() => { void loadBuilderExecutionHistory().then(setHistory) }, 15_000)
+    return () => clearInterval(id)
   }, [])
 
-  const handleRefresh = useCallback(async () => {
-    setRefreshing(true)
-    try {
-      const data = await refreshBackendFiles()
-      setSnapshot(data)
-      if (!data.tabs.some((tab) => tab.id === activeTab) && data.tabs[0]) {
-        setActiveTab(data.tabs[0].id)
-      }
-    } finally {
-      setRefreshing(false)
-    }
-  }, [activeTab])
-
-  const tabs = snapshot?.tabs ?? []
-  const activeMeta = useMemo<TabMeta | undefined>(
-    () => tabs.find((tab) => tab.id === activeTab),
-    [tabs, activeTab]
-  )
-  const isJarvis = activeTab === 'jarvis'
-
-  if (!snapshot) {
+  if (!history) {
     return (
-      <div className="flex flex-1 items-center justify-center">
-        <div
-          className="rounded-lg px-5 py-4"
-          style={{
-            background: 'rgba(0,212,255,0.035)',
-            border: '1px solid rgba(0,212,255,0.12)',
-          }}
-        >
-          <p className="text-[11px] font-mono tracking-[0.18em]" style={{ color: 'rgba(0,212,255,0.74)' }}>
-            LOADING JARVIS SHELL
-          </p>
-        </div>
+      <div className="flex h-full items-center justify-center">
+        <span className="text-[10px] font-mono" style={{ color: 'rgba(0,212,255,0.45)' }}>
+          Loading coding team…
+        </span>
       </div>
     )
   }
 
   return (
-    <div className="flex flex-1 min-h-0 overflow-visible">
-      <CommandPalette />
-      <TabNav tabs={tabs} activeTab={activeTab} onTabChange={setActiveTab} />
+    <div className="h-full overflow-y-auto px-5 py-4">
+      <AgentsTab
+        section={CODING_SECTION}
+        agents={[]}
+        runHistory={EMPTY_RUN_HISTORY}
+        builderExecutionHistory={history}
+      />
+    </div>
+  )
+}
 
-      <div className="flex min-w-0 flex-1 flex-col overflow-visible">
-        {isJarvis ? (
-          <div className="flex min-h-0 flex-1 overflow-visible">
-            <JarvisHomeTab />
-          </div>
-        ) : (
-          <>
-        <div
-          className="flex items-center justify-between gap-4 px-5 py-4 flex-shrink-0"
-          style={{
-            borderBottom: '1px solid rgba(0,212,255,0.08)',
-            background: 'linear-gradient(180deg, rgba(7,14,23,0.8), rgba(7,14,23,0.28))',
-          }}
-        >
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <p className="text-[15px] font-mono tracking-[0.14em]" style={{ color: 'rgba(192,232,240,0.92)' }}>
-                {activeMeta?.label ?? 'Demo'}
-              </p>
-              {activeMeta && <TruthBadge label={activeMeta.truthLabel} />}
-              {activeMeta?.sourceLayer === 'local-extension' && (
-                <span
-                  className="rounded px-1.5 py-0.5 text-[8px] font-mono tracking-[0.14em]"
-                  style={{
-                    color:      'rgba(255,200,74,0.72)',
-                    background: 'rgba(255,200,74,0.07)',
-                    border:     '1px solid rgba(255,200,74,0.14)',
-                  }}
-                >
-                  LOCAL
-                </span>
-              )}
-            </div>
-            {activeMeta?.demoIntent && (
-              <p className="mt-0.5 text-[11px] leading-snug" style={{ color: 'rgba(192,232,240,0.38)' }}>
-                {activeMeta.demoIntent}
-              </p>
-            )}
-            <p className="mt-0.5 text-[9px] font-mono" style={{ color: 'rgba(0,212,255,0.38)' }}>
-              {activeMeta?.sourceLayer === 'local-extension'
-                ? 'local extension'
-                : activeMeta?.backendSource ?? '—'}
-            </p>
-          </div>
+// ── Chat view ───────────────────────────────────────────────────────────────────
 
-          <div className="flex items-center gap-3 flex-shrink-0">
-            {snapshot.errors.length > 0 && (
-              <div className="flex items-center gap-1.5" style={{ color: '#ff6b35' }}>
-                <AlertTriangle className="h-3 w-3" />
-                <span className="text-[10px] font-mono">{snapshot.errors.length} read issue{snapshot.errors.length > 1 ? 's' : ''}</span>
-              </div>
-            )}
-            <span className="text-[10px] font-mono" style={{ color: 'rgba(192,232,240,0.34)' }}>
-              refreshed {new Date(snapshot.refreshedAt).toLocaleTimeString()}
-            </span>
-            <motion.button
-              onClick={handleRefresh}
-              disabled={refreshing}
-              className="flex items-center gap-1.5 rounded-md px-3 py-2"
-              style={{
-                background: 'rgba(0,212,255,0.05)',
-                border: '1px solid rgba(0,212,255,0.14)',
-                color: refreshing ? 'rgba(0,212,255,0.35)' : 'rgba(0,212,255,0.72)',
-                cursor: refreshing ? 'not-allowed' : 'pointer',
-              }}
-              whileHover={!refreshing ? { background: 'rgba(0,212,255,0.09)' } : {}}
-              whileTap={!refreshing ? { scale: 0.97 } : {}}
-            >
-              <motion.div
-                animate={refreshing ? { rotate: 360 } : { rotate: 0 }}
-                transition={refreshing ? { duration: 1, repeat: Infinity, ease: 'linear' } : { duration: 0.2 }}
-              >
-                <RefreshCw className="h-3 w-3" />
-              </motion.div>
-              <span className="text-[10px] font-mono">{refreshing ? 'READING' : 'RELOAD'}</span>
-            </motion.button>
-          </div>
-        </div>
-
-        <div className="flex min-h-0 flex-1 overflow-hidden">
-          <div className="min-w-0 flex-1 overflow-y-auto px-5 py-5">
-            <AnimatePresence mode="wait">
-              <motion.div
-                key={activeTab}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.24, ease: 'easeOut' }}
-              >
-                <ErrorBoundary>
-                {activeTab === 'command' && (
-                  <CommandCenterTab onNavigate={setActiveTab} />
-                )}
-                {activeTab === 'agents' && snapshot.sections.agents && (
-                  <AgentsTab
-                    section={snapshot.sections.agents}
-                    agents={snapshot.agentOperations}
-                    runHistory={snapshot.runHistory}
-                    builderExecutionHistory={snapshot.builderExecutionHistory}
-                  />
-                )}
-                {activeTab === 'memory' && snapshot.sections.memory && (
-                  <MemoryTab section={snapshot.sections.memory} memory={snapshot.memory} />
-                )}
-                {activeTab === 'time' && snapshot.sections.time && (
-                  <TimeTab
-                    section={snapshot.sections.time}
-                    weeklySlots={snapshot.weeklySlots}
-                    candidateBlocks={snapshot.candidateBlocks}
-                  />
-                )}
-                {activeTab === 'work' && snapshot.sections.work && (
-                  <WorkTab section={snapshot.sections.work} workLedger={snapshot.workLedger} />
-                )}
-                {activeTab === 'system' && snapshot.sections.system && (
-                  <SystemTab
-                    section={snapshot.sections.system}
-                    systemState={snapshot.systemState}
-                    runHistory={snapshot.runHistory}
-                    builderExecutionHistory={snapshot.builderExecutionHistory}
-                  />
-                )}
-                {activeTab === 'research' && snapshot.sections.research && (
-                  <ResearchTab section={snapshot.sections.research} researchState={snapshot.researchState} />
-                )}
-                {activeTab === 'calendar' && snapshot.sections.calendar && (
-                  <CalendarTab section={snapshot.sections.calendar} calendarState={snapshot.calendarState} />
-                )}
-                {activeTab === 'financing' && snapshot.sections.financing && (
-                  <FinancingTab section={snapshot.sections.financing} />
-                )}
-                {activeTab === 'misc' && snapshot.sections.misc && (
-                  <MiscTab section={snapshot.sections.misc} />
-                )}
-                </ErrorBoundary>
-              </motion.div>
-            </AnimatePresence>
-          </div>
-
-          <aside
-            className="hidden xl:flex xl:w-[280px] xl:flex-col xl:gap-3 xl:px-4 xl:py-5 xl:flex-shrink-0"
-            style={{
-              borderLeft: '1px solid rgba(0,212,255,0.08)',
-              background: 'rgba(4,10,18,0.45)',
-            }}
-          >
-            <SummaryCard
-              title="Truth Snapshot"
-              icon={<Shield className="h-3.5 w-3.5" />}
-              lines={[
-                `${tabs.length} tabs from manifest`,
-                `${tabs.filter((tab) => tab.sourceLayer === 'official-openclaw').length} official OpenClaw tabs`,
-                `${tabs.filter((tab) => tab.sourceLayer === 'local-extension').length} local extension tabs`,
-                `${snapshot.agentOperations.length} tracked worker roles`,
-                `${snapshot.workLedger.items.length} real work items`,
-              ]}
-            />
-            <SummaryCard
-              title="Runtime Readiness"
-              icon={<Workflow className="h-3.5 w-3.5" />}
-              lines={[
-                snapshot.sections.system?.status === 'live' ? 'System truth is live' : 'System truth unavailable',
-                snapshot.sections.memory?.status === 'live' ? 'Memory truth is live' : 'Memory truth unavailable',
-                snapshot.sections.research?.status === 'blocked' ? 'Research stays blocked honestly' : 'Research state changed',
-                snapshot.sections.calendar?.status === 'future' ? 'Calendar stays future-facing' : 'Calendar state changed',
-              ]}
-            />
-            {snapshot.errors.length > 0 && (
-              <SummaryCard
-                title="Read Issues"
-                icon={<AlertTriangle className="h-3.5 w-3.5" />}
-                lines={snapshot.errors}
-                tone="warn"
-              />
-            )}
-          </aside>
-        </div>
-          </>
-        )}
+function ChatView() {
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex-1 min-h-0 overflow-hidden">
+        <MessageList />
+      </div>
+      <div className="flex-shrink-0">
+        <InputBar />
       </div>
     </div>
   )
 }
 
-function SummaryCard({
-  title,
-  icon,
-  lines,
-  tone = 'info',
-}: {
-  title: string
-  icon: ReactNode
-  lines: string[]
-  tone?: 'info' | 'warn'
-}) {
-  const color = tone === 'warn' ? '#ff6b35' : '#00d4ff'
+// ── Jarvis compact sidebar ──────────────────────────────────────────────────────
+
+function JarvisSidebar() {
+  const messages = useJarvisStore((s) => s.messages)
+  const ocStatus = useJarvisStore((s) => s.ocStatus)
+  const statusChecked = useJarvisStore((s) => s.statusChecked)
+  const reactorVisualLive = useJarvisStore((s) => s.reactorVisualLive)
+  const streamPhase = useJarvisStore((s) => s.streamPhase)
+  const sessionStart = useJarvisStore((s) => s.sessionStart)
+  const systemLogs = useJarvisStore((s) => s.systemLogs)
+
+  const isEngaged = streamPhase === 'streaming' || streamPhase === 'start'
+  const toolCalls = messages.flatMap((m) => m.toolCalls ?? [])
+  const displayStatus = getReactorDisplayStatus({ reactorVisualLive, statusChecked, ocStatus })
+
+  const [clock, setClock] = useState('')
+  const [energy, setEnergy] = useState(84)
+
+  useEffect(() => {
+    const tick = () => setClock(new Date().toLocaleTimeString('en-US', { hour12: false }))
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  useEffect(() => {
+    const id = setInterval(() => setEnergy(72 + Math.floor(Math.random() * 27)), 2000)
+    return () => clearInterval(id)
+  }, [])
+
+  const sessionAge = Math.floor((Date.now() - new Date(sessionStart).getTime()) / 1000)
+  const uptime = sessionAge < 60 ? `${sessionAge}s` : `${Math.floor(sessionAge / 60)}m ${sessionAge % 60}s`
+
+  const phaseLabel = streamPhase === 'streaming' ? 'RESPONDING'
+    : streamPhase === 'start' ? 'PROCESSING'
+    : streamPhase === 'complete' ? 'COMPLETE'
+    : streamPhase === 'error' ? 'ERROR'
+    : 'STANDBY'
+
+  const phaseColor = streamPhase === 'complete' ? '#00ff88'
+    : streamPhase === 'error' ? '#ff6b35'
+    : isEngaged ? '#00d4ff'
+    : 'rgba(192,232,240,0.55)'
 
   return (
     <div
-      className="rounded-lg px-4 py-3"
+      className="flex h-full flex-col flex-shrink-0 overflow-y-auto overflow-x-hidden"
       style={{
-        background: 'rgba(0,212,255,0.03)',
-        border: `1px solid ${tone === 'warn' ? 'rgba(255,107,53,0.16)' : 'rgba(0,212,255,0.1)'}`,
+        width: 200,
+        borderLeft: '1px solid rgba(0,212,255,0.06)',
+        borderRight: '1px solid rgba(0,212,255,0.08)',
+        background: 'linear-gradient(180deg, rgba(4,14,24,0.95), rgba(4,10,18,0.9))',
       }}
     >
-      <div className="mb-2 flex items-center gap-2" style={{ color }}>
-        {icon}
-        <span className="text-[10px] font-mono tracking-[0.16em]">{title.toUpperCase()}</span>
-      </div>
-      <div className="flex flex-col gap-1.5">
-        {lines.map((line, index) => (
-          <p key={index} className="text-[10px] leading-snug" style={{ color: 'rgba(192,232,240,0.55)' }}>
-            {line}
-          </p>
-        ))}
-      </div>
+      {/* Reactor orb */}
+      <motion.div
+        className="flex flex-col items-center pt-3 pb-1 flex-shrink-0"
+        initial={{ opacity: 0, scale: 0.7 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ type: 'spring', stiffness: 200, damping: 16, mass: 0.9, delay: 0.3 }}
+      >
+        <ReactorOrb size={120} showLabel={false} />
+        <motion.p
+          className="mt-1 font-mono select-none"
+          style={{ fontSize: '1rem', letterSpacing: '0.08em', color: '#00d4ff', textShadow: '0 0 10px rgba(0,212,255,0.3)', fontWeight: 300 }}
+          animate={{ opacity: [0.6, 1, 0.6] }}
+          transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
+        >
+          {clock}
+        </motion.p>
+        <p className="text-[9px] font-mono tracking-[0.16em] mt-0.5" style={{ color: phaseColor }}>
+          {phaseLabel}
+        </p>
+      </motion.div>
+
+      {/* HUD panels — staggered fade up */}
+      <motion.div
+        className="px-2 pb-3 space-y-2"
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ ...SPRING_SNAPPY, delay: 0.5 }}
+      >
+        <HudCornerPanel title="STATUS" engaged={isEngaged} className="!p-0">
+          <PanelRow label="Core" value={displayStatus.coreValue} valueColor={displayStatus.color} highlight />
+          <PanelRow label="Uptime" value={uptime} />
+          <PanelRow label="Messages" value={String(messages.length)} />
+          <PanelRow label="Tools" value={String(toolCalls.length)} />
+        </HudCornerPanel>
+
+        <HudCornerPanel title="ENERGY" engaged={isEngaged} className="!p-0">
+          <PanelRow label="Arc Reactor" value={`${energy}%`} valueColor="#00d4ff" highlight />
+          <div className="my-1 rounded-full overflow-hidden" style={{ height: 2, background: 'rgba(0,212,255,0.1)' }}>
+            <motion.div
+              className="h-full rounded-full"
+              style={{ background: 'linear-gradient(to right, rgba(0,212,255,0.5), #00d4ff)', boxShadow: '0 0 4px rgba(0,212,255,0.5)' }}
+              animate={{ width: `${energy}%` }}
+              transition={{ duration: 1.4, ease: 'easeInOut' }}
+            />
+          </div>
+          <PanelRow label="Phase" value={streamPhase.toUpperCase()} valueColor={phaseColor} />
+        </HudCornerPanel>
+
+        <HudCornerPanel title="CONNECTION" engaged={isEngaged} className="!p-0">
+          <PanelRow label="Status" value={displayStatus.connectionValue} valueColor={displayStatus.color} highlight />
+          <PanelRow label="Gateway" value={displayStatus.gatewayHint} />
+          <PanelRow label="Model" value={ocStatus.model ? ocStatus.model.slice(0, 14) : '—'} />
+        </HudCornerPanel>
+
+        <HudCornerPanel title="LOG" engaged={false} className="!p-0">
+          <div className="space-y-0.5 max-h-24 overflow-y-auto">
+            {systemLogs.length === 0 ? (
+              <p className="text-[8px] font-mono" style={{ color: 'rgba(192,232,240,0.2)' }}>—</p>
+            ) : (
+              systemLogs.slice(-8).map((line, i) => (
+                <p
+                  key={i}
+                  className="text-[8px] font-mono leading-tight truncate"
+                  style={{
+                    color: line.includes('✗') ? '#ff6b35'
+                      : line.includes('✓') ? '#00ff88'
+                      : 'rgba(192,232,240,0.4)',
+                  }}
+                >
+                  {line.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '')}
+                </p>
+              ))
+            )}
+          </div>
+        </HudCornerPanel>
+      </motion.div>
     </div>
+  )
+}
+
+// ── Mode toggle ─────────────────────────────────────────────────────────────────
+
+function ModeToggle({ mode, onSwitch }: { mode: CenterMode; onSwitch: (m: CenterMode) => void }) {
+  return (
+    <div
+      className="flex items-center rounded overflow-hidden"
+      style={{ border: '1px solid rgba(0,212,255,0.16)', background: 'rgba(0,10,20,0.5)' }}
+    >
+      <ToggleButton
+        active={mode === 'chat'}
+        icon={<MessageSquare className="w-3 h-3" />}
+        label="CHAT"
+        onClick={() => onSwitch('chat')}
+      />
+      <ToggleButton
+        active={mode === 'code'}
+        icon={<Code2 className="w-3 h-3" />}
+        label="CODE"
+        onClick={() => onSwitch('code')}
+      />
+    </div>
+  )
+}
+
+function ToggleButton({
+  active,
+  icon,
+  label,
+  onClick,
+}: {
+  active: boolean
+  icon: ReactNode
+  label: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="relative flex items-center gap-1.5 px-3.5 py-1.5 transition-colors"
+      style={{
+        color: active ? '#00d4ff' : 'rgba(74,122,138,0.6)',
+        background: active ? 'rgba(0,212,255,0.10)' : 'transparent',
+      }}
+    >
+      {icon}
+      <span className="text-[9px] font-mono tracking-[0.14em]">{label}</span>
+    </button>
   )
 }

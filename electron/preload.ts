@@ -24,6 +24,28 @@ import type {
   CheckerVerifyRunResult,
 } from '../src/shared/builder-bridge'
 
+type LegacyTtsSpeakResult =
+  | ArrayBuffer
+  | Uint8Array
+  | {
+      type: 'Buffer'
+      data: number[]
+    }
+
+type TtsSpeakResult =
+  | LegacyTtsSpeakResult
+  | {
+      ok: true
+      mimeType: string
+      audioBase64: string
+      bytes: number
+    }
+  | {
+      ok: false
+      error: string
+      status?: number
+    }
+
 const jarvisAPI = {
   // ── Window controls ──────────────────────────────────────────────────────────
   window: {
@@ -132,6 +154,32 @@ const jarvisAPI = {
   checker: {
     verifyRun: (input: CheckerVerifyRunInput): Promise<CheckerVerifyRunResult> =>
       ipcRenderer.invoke('checker:verifyRun', input),
+  },
+
+  // ── LLM ──────────────────────────────────────────────────────────────────────
+  llm: {
+    /**
+     * Send a message to the active LLM provider (Claude).
+     * Tokens arrive via `onStream`; resolves when the stream ends or errors.
+     */
+    send: (
+      message: string,
+      history?: Array<{ role: string; content: string }>
+    ) => ipcRenderer.invoke('llm:send', { message, history }),
+
+    /** Stream listener — events: { type: 'token'|'end'|'error', payload: string } */
+    onStream: (cb: (event: { type: string; payload: string }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, e: { type: string; payload: string }) => cb(e)
+      ipcRenderer.on('llm:stream', handler)
+      return () => ipcRenderer.removeListener('llm:stream', handler)
+    },
+  },
+
+  // ── TTS ──────────────────────────────────────────────────────────────────────
+  tts: {
+    /** Returns ElevenLabs speech audio or an error payload from the main process. */
+    speak: (text: string): Promise<TtsSpeakResult | null> =>
+      ipcRenderer.invoke('tts:speak', { text }),
   },
 }
 

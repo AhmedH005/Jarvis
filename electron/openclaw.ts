@@ -386,38 +386,60 @@ export class OpenClawBridge {
 
   async startDetachedMessage(
     message: string,
-    conversationId?: string
+    conversationId?: string,
+    onComplete?: (text: string, state: 'final' | 'aborted' | 'error') => void,
+    agentId?: string
   ): Promise<{ runId: string }> {
     const auth = this.resolveGatewayAuth()
     const { identity, clientId, clientMode, role, scopes } = auth
     const runId = crypto.randomUUID()
     const connectId = crypto.randomUUID()
     const sendId = crypto.randomUUID()
-    const sessionKey = conversationId ?? 'main'
+    // If agentId is provided, use the fully-qualified agent session key format
+    // so the gateway routes this message to the correct isolated agent workspace.
+    // Format: agent:<agentId>:<conversationKey>
+    const rawKey = conversationId ?? 'main'
+    const sessionKey = agentId ? `agent:${agentId}:${rawKey}` : rawKey
 
     return await new Promise<{ runId: string }>((resolve, reject) => {
       const ws = new WebSocket(this.wsUrl)
       let finished = false
       let accepted = false
       let connectSent = false
+      let latestText = ''
 
-      const cleanup = () => {
+      const finish = (completionState: 'final' | 'aborted' | 'error') => {
         if (finished) return
         finished = true
         clearTimeout(timeout)
         try {
           ws.close()
         } catch {}
+        if (onComplete) {
+          try {
+            onComplete(latestText, completionState)
+          } catch {}
+        }
       }
 
-      const fail = (message: string) => {
+      const cleanup = () => finish('final')
+
+      const fail = (errorMessage: string) => {
         if (finished) return
         finished = true
         clearTimeout(timeout)
         try {
           ws.close()
         } catch {}
-        reject(new Error(message))
+        if (accepted) {
+          if (onComplete) {
+            try {
+              onComplete(latestText, 'error')
+            } catch {}
+          }
+        } else {
+          reject(new Error(errorMessage))
+        }
       }
 
       const accept = () => {
@@ -532,41 +554,63 @@ export class OpenClawBridge {
 
         if (frame.type !== 'event') return
 
+        if (frame.event === 'agent') {
+          const payload = frame.payload as {
+            runId?: unknown
+            stream?: unknown
+            data?: { delta?: unknown; text?: unknown }
+          } | undefined
+
+          if (payload?.runId !== runId || payload.stream !== 'assistant') return
+
+          const nextText = typeof payload.data?.text === 'string'
+            ? payload.data.text
+            : typeof payload.data?.delta === 'string'
+              ? latestText + payload.data.delta
+              : ''
+
+          if (nextText) latestText = nextText
+          return
+        }
+
         if (frame.event === 'chat') {
           const payload = frame.payload as {
             runId?: unknown
             state?: unknown
+            message?: unknown
             errorMessage?: unknown
           } | undefined
 
           if (payload?.runId !== runId) return
 
-          if (payload.state === 'final') {
-            cleanup()
+          const messageText = this.extractText(payload?.message)
+          if (messageText) latestText = messageText
+
+          if (payload?.state === 'final') {
+            finish('final')
             return
           }
 
-          if (payload.state === 'aborted') {
+          if (payload?.state === 'aborted') {
             if (!accepted) fail('Request aborted before execution start acknowledgement')
-            else cleanup()
+            else finish('aborted')
             return
           }
 
-          if (payload.state === 'error') {
-            const message = typeof payload.errorMessage === 'string' ? payload.errorMessage : 'Chat error'
-            if (!accepted) fail(message)
-            else cleanup()
+          if (payload?.state === 'error') {
+            const errorMsg = typeof payload.errorMessage === 'string' ? payload.errorMessage : 'Chat error'
+            fail(errorMsg)
           }
         }
       })
 
       ws.on('error', (err: Error) => {
-        if (!accepted) fail(err instanceof Error ? err.message : String(err))
-        else cleanup()
+        fail(err instanceof Error ? err.message : String(err))
       })
 
       ws.on('close', () => {
         if (!accepted) fail('Gateway connection closed before execution start acknowledgement')
+        else if (!finished) finish('error')
       })
     })
   }

@@ -20,7 +20,13 @@ export function TitleBar() {
       style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
     >
       {/* Left: logo + name */}
-      <div className="flex items-center gap-2" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+      <motion.div
+        className="flex items-center gap-2"
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        initial={{ opacity: 0, x: -16 }}
+        animate={{ opacity: 1, x: 0 }}
+        transition={{ type: 'spring', stiffness: 320, damping: 22, delay: 0.1 }}
+      >
         <motion.div
           animate={{ rotate: 360 }}
           transition={{ duration: 8, repeat: Infinity, ease: 'linear' }}
@@ -31,10 +37,15 @@ export function TitleBar() {
           JARVIS
         </span>
         <span className="text-xs font-mono text-jarvis-muted ml-1">v0.1</span>
-      </div>
+      </motion.div>
 
       {/* Center: status */}
-      <div className="flex items-center gap-2">
+      <motion.div
+        className="flex items-center gap-2"
+        initial={{ opacity: 0, scale: 0.9 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ type: 'spring', stiffness: 280, damping: 20, delay: 0.2 }}
+      >
         <motion.div
           className="w-1.5 h-1.5 rounded-full"
           style={{ background: displayStatus.color }}
@@ -44,27 +55,32 @@ export function TitleBar() {
         <span className="text-[10px] font-mono text-jarvis-muted">
           {displayStatus.titleText}
         </span>
-      </div>
+      </motion.div>
 
       {/* Right: window controls */}
-      <div
+      <motion.div
         className="flex items-center gap-1"
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        initial={{ opacity: 0, x: 16 }}
+        animate={{ opacity: 1, x: 0 }}
+        transition={{ type: 'spring', stiffness: 320, damping: 22, delay: 0.15 }}
       >
         {[
           { icon: Minus, action: handleMinimize, color: '#ffbd2e' },
           { icon: Square, action: handleMaximize, color: '#28c840' },
           { icon: X,     action: handleClose,    color: '#ff5f57' },
         ].map(({ icon: Icon, action, color }) => (
-          <button
+          <motion.button
             key={color}
             onClick={action}
             className="w-6 h-6 rounded flex items-center justify-center hover:bg-white/5 transition-colors"
+            whileHover={{ scale: 1.15 }}
+            whileTap={{ scale: 0.9 }}
           >
             <Icon className="w-3 h-3" style={{ color }} />
-          </button>
+          </motion.button>
         ))}
-      </div>
+      </motion.div>
     </div>
   )
 }
