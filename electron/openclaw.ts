@@ -619,14 +619,16 @@ export class OpenClawBridge {
     message: string,
     conversationId: string | undefined,
     _history: Array<{ role: string; content: string }>,
-    onEvent: (e: StreamEvent) => void
+    onEvent: (e: StreamEvent) => void,
+    agentId?: string
   ): Promise<void> {
     const auth = this.resolveGatewayAuth()
     const { identity, clientId, clientMode, role, scopes } = auth
     const runId = crypto.randomUUID()
     const connectId = crypto.randomUUID()
     const sendId = crypto.randomUUID()
-    const sessionKey = conversationId ?? 'main'
+    const rawKey = conversationId ?? 'main'
+    const sessionKey = agentId ? `agent:${agentId}:${rawKey}` : rawKey
 
     onEvent({ type: 'start', payload: '' })
 

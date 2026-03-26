@@ -2,9 +2,13 @@ import { useState, useRef, useEffect, KeyboardEvent } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Send } from 'lucide-react'
 import { useJarvisStore } from '@/store/jarvis'
+import { usePlannerStore } from '@/store/planner'
 import { nanoid } from '@/lib/utils'
 import { playSendTone, resumeAudio } from '@/lib/audio'
 import { getReactorDisplayStatus } from '@/lib/reactor-display'
+import { handlePlannerCommand, isPlannerIntent } from '@/features/planner/plannerCommandRouter'
+import { handlePlanRefinement, isPlanRefinementIntent } from '@/features/planner/plannerRefinement'
+import { handlePlannerIntake, isIntakeIntent } from '@/features/planner/plannerIntakeAgent'
 import type { Message, StreamEvent } from '@/types'
 
 export function InputBar() {
@@ -17,7 +21,6 @@ export function InputBar() {
   const setStreamPhase  = useJarvisStore((s) => s.setStreamPhase)
   const addMessage      = useJarvisStore((s) => s.addMessage)
   const applyStreamEvent = useJarvisStore((s) => s.applyStreamEvent)
-  const finalizeMessage = useJarvisStore((s) => s.finalizeMessage)
   const pushLog         = useJarvisStore((s) => s.pushLog)
   const conversationId  = useJarvisStore((s) => s.conversationId)
   const ocStatus        = useJarvisStore((s) => s.ocStatus)
@@ -25,6 +28,13 @@ export function InputBar() {
   const reactorVisualLive = useJarvisStore((s) => s.reactorVisualLive)
   const config          = useJarvisStore((s) => s.config)
   const messages        = useJarvisStore((s) => s.messages)
+  const plannerPreview = useJarvisStore((s) => s.plannerPreview)
+  const setPlannerPreview = useJarvisStore((s) => s.setPlannerPreview)
+  const activePlanSession = useJarvisStore((s) => s.activePlanSession)
+  const setActivePlanSession = useJarvisStore((s) => s.setActivePlanSession)
+  const setIntakePreview = useJarvisStore((s) => s.setIntakePreview)
+  const tasks = usePlannerStore((s) => s.tasks)
+  const blocks = usePlannerStore((s) => s.blocks)
 
   const isStreaming = streamPhase === 'streaming' || streamPhase === 'start'
   // Allow sending any time we have text and aren't already streaming
@@ -62,6 +72,96 @@ export function InputBar() {
 
     // Add user message
     addMessage({ id: nanoid(), role: 'user', content: userText, timestamp: new Date() } as Message)
+
+    const plannerDate = new Date().toISOString().split('T')[0]
+    const plannerContext = {
+      currentDate: plannerDate,
+      selectedDate: plannerDate,
+      tasks,
+      blocks,
+    }
+
+    // ── Route 1: Refinement (requires active plan session) ───────────────────
+    if (activePlanSession && plannerPreview?.result && isPlanRefinementIntent(userText)) {
+      pushLog(`[route:refinement] ${userText.slice(0, 50)}`)
+      const plannerResponse = await handlePlanRefinement(userText, activePlanSession, plannerContext)
+      setPlannerPreview(plannerResponse)
+      if (plannerResponse.result) {
+        setActivePlanSession({
+          result: plannerResponse.result,
+          command: activePlanSession.command,
+          timestamp: new Date().toISOString(),
+          refinementConstraints: plannerResponse.refinementConstraints ?? activePlanSession.refinementConstraints,
+          refinementHistory: [
+            ...activePlanSession.refinementHistory,
+            {
+              input: userText,
+              timestamp: new Date().toISOString(),
+              constraints: plannerResponse.refinementConstraints ?? activePlanSession.refinementConstraints,
+            },
+          ],
+        })
+      }
+      addMessage({ id: nanoid(), role: 'assistant', content: plannerResponse.summary, timestamp: new Date() } as Message)
+      setStreamPhase('complete')
+      setTimeout(() => setStreamPhase('idle'), 600)
+      return
+    }
+
+    // ── Route 2: Planner command (optimize/protect/schedule) ─────────────────
+    if (isPlannerIntent(userText)) {
+      pushLog(`[route:planner] ${userText.slice(0, 50)}`)
+      const plannerResponse = await handlePlannerCommand(userText, plannerContext)
+
+      if (plannerResponse.command.type !== 'unknown') {
+        setPlannerPreview(plannerResponse)
+        setIntakePreview(null)
+        if (
+          plannerResponse.result &&
+          (plannerResponse.command.type === 'optimize_day' || plannerResponse.command.type === 'optimize_week')
+        ) {
+          setActivePlanSession({
+            result: plannerResponse.result,
+            command: plannerResponse.command,
+            timestamp: new Date().toISOString(),
+            refinementConstraints: plannerResponse.refinementConstraints ?? {},
+            refinementHistory: [],
+          })
+        } else {
+          setActivePlanSession(null)
+        }
+        addMessage({ id: nanoid(), role: 'assistant', content: plannerResponse.summary, timestamp: new Date() } as Message)
+        setStreamPhase('complete')
+        setTimeout(() => setStreamPhase('idle'), 600)
+        return
+      }
+
+      pushLog('[route:planner] command unknown · continuing to intake check')
+    }
+
+    // ── Route 3: Intake (life events / tasks with dates) ─────────────────────
+    if (isIntakeIntent(userText)) {
+      pushLog(`[route:intake] ${userText.slice(0, 50)}`)
+      const intakeResponse = await handlePlannerIntake(userText, plannerContext)
+
+      if (intakeResponse.kind !== 'unknown') {
+        setIntakePreview(intakeResponse)
+        setPlannerPreview(null)
+        setActivePlanSession(null)
+        addMessage({ id: nanoid(), role: 'assistant', content: intakeResponse.summary, timestamp: new Date() } as Message)
+        setStreamPhase('complete')
+        setTimeout(() => setStreamPhase('idle'), 600)
+        return
+      }
+
+      pushLog('[route:intake] nothing extracted · continuing to chat')
+    }
+
+    // ── Route 4: Normal chat via OpenClaw main agent ──────────────────────────
+    pushLog(`[route:chat] ${userText.slice(0, 50)}`)
+    setPlannerPreview(null)
+    setIntakePreview(null)
+    setActivePlanSession(null)
 
     // Placeholder assistant message
     const asstId = nanoid()

@@ -63,8 +63,9 @@ const jarvisAPI = {
     send: (
       message:        string,
       conversationId?: string,
-      history?:       Array<{ role: string; content: string }>
-    ) => ipcRenderer.invoke('openclaw:send', { message, conversationId, history }),
+      history?:       Array<{ role: string; content: string }>,
+      agentId?:       string
+    ) => ipcRenderer.invoke('openclaw:send', { message, conversationId, history, agentId }),
 
     /**
      * Unified stream listener.

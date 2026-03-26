@@ -114,12 +114,13 @@ function registerIpcHandlers(b: OpenClawBridge): void {
       message:        string
       conversationId?: string
       history?:       Array<{ role: string; content: string }>
+      agentId?:       string
     }) => {
       const send = (e: StreamEvent) => {
         if (!event.sender.isDestroyed()) event.sender.send('openclaw:stream', e)
       }
       try {
-        await b.sendMessage(payload.message, payload.conversationId, payload.history ?? [], send)
+        await b.sendMessage(payload.message, payload.conversationId, payload.history ?? [], send, payload.agentId)
       } catch (err: unknown) {
         send({ type: 'error', payload: err instanceof Error ? err.message : String(err) })
       }

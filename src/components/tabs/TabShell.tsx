@@ -9,6 +9,8 @@ import { HudCornerPanel, PanelRow } from '@/components/hud/HudCornerPanel'
 import { MessageList } from '@/components/chat/MessageList'
 import { InputBar } from '@/components/chat/InputBar'
 import { getReactorDisplayStatus } from '@/lib/reactor-display'
+import { OptimizePreviewPanel } from '@/features/planner/OptimizePreviewPanel'
+import { IntakePreviewPanel }   from '@/features/planner/IntakePreviewPanel'
 import { TabNav } from './TabNav'
 import { CommandPalette } from './CommandPalette'
 import { AgentsTab } from './AgentsTab'
@@ -161,8 +163,41 @@ function CodingTeamLoader() {
 // ── Chat view ───────────────────────────────────────────────────────────────────
 
 function ChatView() {
+  const plannerPreview = useJarvisStore((s) => s.plannerPreview)
+  const setPlannerPreview = useJarvisStore((s) => s.setPlannerPreview)
+  const setActivePlanSession = useJarvisStore((s) => s.setActivePlanSession)
+  const intakePreview = useJarvisStore((s) => s.intakePreview)
+  const setIntakePreview = useJarvisStore((s) => s.setIntakePreview)
+  const optimizeType = plannerPreview?.result && 'weekStart' in plannerPreview.result ? 'week' : 'day'
+
   return (
     <div className="flex flex-col h-full">
+      {plannerPreview?.result && (
+        <div
+          className="flex-shrink-0"
+          style={{ borderBottom: '1px solid rgba(157,78,221,0.12)', background: 'rgba(157,78,221,0.035)' }}
+        >
+          <OptimizePreviewPanel
+            result={plannerPreview.result}
+            optimizeType={optimizeType}
+            onDismiss={() => {
+              setPlannerPreview(null)
+              setActivePlanSession(null)
+            }}
+          />
+        </div>
+      )}
+      {intakePreview && (
+        <div
+          className="flex-shrink-0"
+          style={{ borderBottom: '1px solid rgba(0,255,136,0.1)', background: 'rgba(0,255,136,0.02)' }}
+        >
+          <IntakePreviewPanel
+            response={intakePreview}
+            onDismiss={() => setIntakePreview(null)}
+          />
+        </div>
+      )}
       <div className="flex-1 min-h-0 overflow-hidden">
         <MessageList />
       </div>

@@ -63,7 +63,8 @@ declare global {
         send: (
           message: string,
           conversationId?: string,
-          history?: Array<{ role: string; content: string }>
+          history?: Array<{ role: string; content: string }>,
+          agentId?: string
         ) => Promise<void>
         onStream: (cb: (event: StreamEvent) => void) => (() => void)
         onChunk: (cb: (chunk: { type: string; content: string }) => void) => (() => void)

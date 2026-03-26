@@ -5,6 +5,18 @@ import type {
   StreamChunk, StreamEvent, StreamPhase,
 } from '@/types'
 import { DEFAULT_CONFIG } from '@/types'
+import type { PlannerAgentResponse, PlannerCommand } from '@/features/planner/plannerCommandRouter'
+import type { PlannerIntakeResponse } from '@/features/planner/plannerIntakeTypes'
+import type { OptimizeDayResult, OptimizeWeekResult } from '@/features/planner/planningOrchestrator'
+import type { ActiveRefinementConstraints } from '@/features/planner/plannerRefinementTypes'
+
+export interface ActivePlanSession {
+  result: OptimizeDayResult | OptimizeWeekResult
+  command: PlannerCommand
+  timestamp: string
+  refinementConstraints: ActiveRefinementConstraints
+  refinementHistory: Array<{ input: string; timestamp: string; constraints: ActiveRefinementConstraints }>
+}
 
 interface JarvisState {
   // ── Messages ──────────────────────────────────────────────────────────────────
@@ -17,6 +29,12 @@ interface JarvisState {
   appendChunk:     (id: string, chunk: StreamChunk) => void
   finalizeMessage: (id: string) => void
   clearMessages:   () => void
+  plannerPreview: PlannerAgentResponse | null
+  setPlannerPreview: (response: PlannerAgentResponse | null) => void
+  activePlanSession: ActivePlanSession | null
+  setActivePlanSession: (session: ActivePlanSession | null) => void
+  intakePreview: PlannerIntakeResponse | null
+  setIntakePreview: (response: PlannerIntakeResponse | null) => void
 
   // ── Status ────────────────────────────────────────────────────────────────────
   ocStatus:    OpenClawStatus
@@ -52,12 +70,18 @@ interface JarvisState {
 
 export const useJarvisStore = create<JarvisState>()(
   persist(
-    (set, get) => ({
+    (set) => ({
       // ── Messages ────────────────────────────────────────────────────────────────
       messages:       [],
       conversationId: undefined,
 
       addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg] })),
+      plannerPreview: null,
+      setPlannerPreview: (plannerPreview) => set({ plannerPreview }),
+      activePlanSession: null,
+      setActivePlanSession: (activePlanSession) => set({ activePlanSession }),
+      intakePreview: null,
+      setIntakePreview: (intakePreview) => set({ intakePreview }),
 
       applyStreamEvent: (id, event) => set((s) => {
         if (event.type === 'start') {
@@ -175,7 +199,7 @@ export const useJarvisStore = create<JarvisState>()(
         messages:    s.messages.map((m) => m.id === id ? { ...m, streaming: false } : m),
       })),
 
-      clearMessages: () => set({ messages: [], conversationId: undefined }),
+      clearMessages: () => set({ messages: [], conversationId: undefined, plannerPreview: null, activePlanSession: null, intakePreview: null }),
 
       // ── Status ──────────────────────────────────────────────────────────────────
       ocStatus:    { online: false },

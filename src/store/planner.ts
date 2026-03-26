@@ -1,7 +1,45 @@
 import { create } from 'zustand'
 import { uid, today, addDays } from '@/lib/dateUtils'
+import type { PlanningAction, OptimizeDayResult, OptimizeWeekResult } from '@/features/planner/planningTypes'
+import {
+  stampActions,
+  orderActionsForExecution,
+  validateActions,
+  computeNextState,
+  runPostApplyValidation,
+  captureSnapshot,
+  type ExecutionResult,
+  type ExecutionSnapshot,
+  type ExecutionHistoryEntry,
+  type ExecutionSource,
+} from '@/features/planner/planningExecution'
+import { syncTasksWithBlocks } from '@/features/planner/plannerStateUtils'
+
+export type { ExecutionResult, ExecutionSnapshot, ExecutionHistoryEntry, ExecutionSource }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
+
+// ── Intake action shapes (avoids circular import with plannerIntakeTypes.ts) ──
+
+export interface IntakeEventData {
+  title: string
+  date: string        // YYYY-MM-DD
+  startTime: string   // HH:MM
+  durationMinutes?: number | null
+  locked: boolean
+  notes?: string
+}
+
+export interface IntakeTaskData {
+  title: string
+  dueDate?: string | null
+  durationMinutes?: number | null
+  priority?: 'low' | 'medium' | 'high' | null
+  energyType?: 'light' | 'moderate' | 'deep' | null
+  notes?: string
+}
+
+// ── Core types ────────────────────────────────────────────────────────────────
 
 export type TaskPriority = 'low' | 'medium' | 'high'
 export type TaskStatus = 'todo' | 'in-progress' | 'done'
@@ -23,6 +61,9 @@ export interface Task {
   project?: string
   recurrence?: string
   linkedCalendarBlockId?: string
+  linkedCalendarBlockIds: string[]
+  scheduledMinutes: number
+  schedulingProgress: number
   splitAllowed: boolean            // can be broken into multiple sessions
   pinned: boolean                  // locked planning priority
   createdAt: string
@@ -44,7 +85,28 @@ export interface CalendarBlock {
   recurring: boolean
   source: BlockSource
   linkedTaskId?: string
+  chunkIndex?: number
+  chunkCount?: number
+  chunkDurationMinutes?: number
+  schedulingGroupId?: string
+  protectedWindowId?: string
+  isProtectedTime?: boolean
+  protectionSource?: 'manual' | 'ai'
   notes?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ProtectedWindow {
+  id: string
+  date: string
+  startTime: string
+  endTime: string
+  durationMinutes: number
+  source: 'manual' | 'ai'
+  locked: boolean
+  blockId?: string
+  rationale?: string
   createdAt: string
   updatedAt: string
 }
@@ -58,8 +120,21 @@ const t = today()
 
 const NOW = new Date().toISOString()
 
-function seedTask(fields: Omit<Task, 'splitAllowed' | 'pinned' | 'updatedAt'> & { splitAllowed?: boolean; pinned?: boolean }): Task {
-  return { splitAllowed: false, pinned: false, updatedAt: NOW, ...fields }
+function seedTask(
+  fields: Omit<Task, 'splitAllowed' | 'pinned' | 'updatedAt' | 'linkedCalendarBlockIds' | 'scheduledMinutes' | 'schedulingProgress'> & {
+    splitAllowed?: boolean
+    pinned?: boolean
+  },
+): Task {
+  return {
+    splitAllowed: false,
+    pinned: false,
+    linkedCalendarBlockIds: [],
+    scheduledMinutes: 0,
+    schedulingProgress: 0,
+    updatedAt: NOW,
+    ...fields,
+  }
 }
 
 const SEED_TASKS: Task[] = [
@@ -140,6 +215,9 @@ const SEED_TASKS: Task[] = [
 // Link first task to a calendar block
 const LINKED_BLOCK_ID = uid('block')
 SEED_TASKS[0].linkedCalendarBlockId = LINKED_BLOCK_ID
+SEED_TASKS[0].linkedCalendarBlockIds = [LINKED_BLOCK_ID]
+SEED_TASKS[0].scheduledMinutes = SEED_TASKS[0].durationMinutes
+SEED_TASKS[0].schedulingProgress = 1
 
 function seedBlock(fields: Omit<CalendarBlock, 'flexible' | 'source' | 'createdAt' | 'updatedAt'> & { flexible?: boolean; source?: BlockSource }): CalendarBlock {
   return { flexible: false, source: 'manual', createdAt: NOW, updatedAt: NOW, ...fields }
@@ -157,17 +235,32 @@ const SEED_BLOCKS: CalendarBlock[] = [
   seedBlock({ id: uid('block'), title: 'Integration testing',     date: addDays(t, 2),  startTime: '14:00', duration: 60,  color: '#00ff88', type: 'focus',      locked: false, recurring: false, flexible: true }),
 ]
 
+// ── Execution layer constants ─────────────────────────────────────────────────
+
+/** Maximum number of execution history entries to keep in memory. */
+const EXECUTION_HISTORY_MAX = 20
+
 // ── Store ─────────────────────────────────────────────────────────────────────
 
 interface PlannerState {
   tasks: Task[]
   blocks: CalendarBlock[]
+  protectedWindows: ProtectedWindow[]
 
+  // ── Execution safety state ────────────────────────────────────────────────
+  /** Bounded in-memory history of completed planning execution passes. */
+  executionHistory: ExecutionHistoryEntry[]
+  /** Snapshot taken immediately before the most recent applyPlanningActions call.
+   *  null when no undo is available (after undo consumed it, or not yet applied). */
+  undoSnapshot: ExecutionSnapshot | null
+
+  // ── Task actions ──────────────────────────────────────────────────────────
   addTask: (task: Task) => void
   updateTask: (id: string, patch: Partial<Task>) => void
   deleteTask: (id: string) => void
   togglePin: (id: string) => void
 
+  // ── Block actions ─────────────────────────────────────────────────────────
   addBlock: (block: CalendarBlock) => void
   updateBlock: (id: string, patch: Partial<CalendarBlock>) => void
   deleteBlock: (id: string) => void
@@ -180,11 +273,75 @@ interface PlannerState {
   unscheduleTask: (taskId: string) => void
   /** Replace all blocks with a rebuilt set (from rebuildDay / rebuildWeek) */
   applyRebuiltBlocks: (blocks: CalendarBlock[]) => void
+  addProtectedWindow: (window: Omit<ProtectedWindow, 'id' | 'createdAt' | 'updatedAt'>) => void
+  removeProtectedWindow: (id: string) => void
+
+  // ── Planning execution actions ────────────────────────────────────────────
+
+  /**
+   * Transactional apply of AI-suggested planning actions.
+   *
+   * Pipeline (all synchronous, single set() call):
+   *   1. Stamp actions with stable execution IDs
+   *   2. Order by dependency phase (defer → place → lock → info)
+   *   3. Validate full batch against current state
+   *   4. If no valid actions, return without mutation
+   *   5. Capture pre-mutation snapshot for undo
+   *   6. Compute next state (pure — no side effects)
+   *   7. Run post-apply validation on proposed state
+   *   8. If critical post-apply failure, discard and return error (no mutation)
+   *   9. Atomically commit new state + snapshot + history entry
+   *
+   * @param actions   The PlanningAction array to apply (subset of result.actions is OK)
+   * @param result    The OptimizeDayResult or OptimizeWeekResult that produced these actions
+   *                  (used for candidate slot resolution)
+   * @param opts      Source label, human-readable summary, optional confidence/plannerSource
+   */
+  applyPlanningActions: (
+    actions: PlanningAction[],
+    result: OptimizeDayResult | OptimizeWeekResult,
+    opts: {
+      source: ExecutionSource
+      summary: string
+      confidence?: number
+      plannerSource?: 'ai' | 'fallback'
+    },
+  ) => ExecutionResult
+
+  /**
+   * Restore planner state to the snapshot captured before the last
+   * applyPlanningActions call. Clears the snapshot after restoring.
+   * No-op if undoSnapshot is null.
+   */
+  undoLastPlanningExecution: () => void
+
+  /**
+   * Remove a single entry from executionHistory by ID.
+   * Useful for the UI's "dismiss" / "x" on history rows.
+   */
+  dismissPlanningHistoryEntry: (id: string) => void
+
+  // ── Intake creation (safe, no planning-execution pipeline needed) ─────────
+
+  /** Create a single locked calendar event from intake data. */
+  createEventBlockFromIntake: (data: IntakeEventData) => void
+  /** Create a single planner task from intake data. */
+  createTaskFromIntake: (data: IntakeTaskData) => void
+  /**
+   * Batch-create events and tasks from intake in one atomic set() call.
+   * Preserves task↔block consistency via syncTasksWithBlocks.
+   */
+  createManyFromIntake: (events: IntakeEventData[], tasks: IntakeTaskData[]) => void
 }
 
 export const usePlannerStore = create<PlannerState>((set) => ({
-  tasks: SEED_TASKS,
+  tasks: syncTasksWithBlocks(SEED_TASKS, SEED_BLOCKS),
   blocks: SEED_BLOCKS,
+  protectedWindows: [],
+
+  // ── Execution safety initial state ────────────────────────────────────────────
+  executionHistory: [],
+  undoSnapshot: null,
 
   // ── Task actions ─────────────────────────────────────────────────────────────
   addTask: (task) => set((s) => ({ tasks: [task, ...s.tasks] })),
@@ -196,11 +353,24 @@ export const usePlannerStore = create<PlannerState>((set) => ({
     set((s) => ({ tasks: s.tasks.map((t) => t.id === id ? { ...t, pinned: !t.pinned, updatedAt: new Date().toISOString() } : t) })),
 
   // ── Block actions ─────────────────────────────────────────────────────────────
-  addBlock: (block) => set((s) => ({ blocks: [...s.blocks, block] })),
+  addBlock: (block) => set((s) => {
+    const blocks = [...s.blocks, block]
+    return { blocks, tasks: syncTasksWithBlocks(s.tasks, blocks) }
+  }),
   updateBlock: (id, patch) =>
-    set((s) => ({ blocks: s.blocks.map((b) => b.id === id ? { ...b, ...patch, updatedAt: new Date().toISOString() } : b) })),
+    set((s) => {
+      const blocks = s.blocks.map((b) => b.id === id ? { ...b, ...patch, updatedAt: new Date().toISOString() } : b)
+      const protectedWindows = patch.protectedWindowId || patch.isProtectedTime === false
+        ? s.protectedWindows.map((window) => window.blockId === id ? { ...window, updatedAt: new Date().toISOString() } : window)
+        : s.protectedWindows
+      return { blocks, tasks: syncTasksWithBlocks(s.tasks, blocks), protectedWindows }
+    }),
   deleteBlock: (id) =>
-    set((s) => ({ blocks: s.blocks.filter((b) => b.id !== id) })),
+    set((s) => {
+      const blocks = s.blocks.filter((b) => b.id !== id)
+      const protectedWindows = s.protectedWindows.filter((window) => window.blockId !== id)
+      return { blocks, protectedWindows, tasks: syncTasksWithBlocks(s.tasks, blocks) }
+    }),
   toggleLock: (id) =>
     set((s) => ({ blocks: s.blocks.map((b) => b.id === id ? { ...b, locked: !b.locked, updatedAt: new Date().toISOString() } : b) })),
   toggleFlexible: (id) =>
@@ -225,30 +395,307 @@ export const usePlannerStore = create<PlannerState>((set) => ({
       }
       return {
         blocks: [...cleanedBlocks, newBlock],
-        tasks: s.tasks.map((t) => t.id === taskId ? { ...t, scheduled: true, linkedCalendarBlockId: blockId, updatedAt: new Date().toISOString() } : t),
+        tasks: syncTasksWithBlocks(
+          s.tasks.map((t) => t.id === taskId ? { ...t, updatedAt: new Date().toISOString() } : t),
+          [...cleanedBlocks, newBlock],
+        ),
       }
     }),
 
   // ── Unschedule ─────────────────────────────────────────────────────────────────
   unscheduleTask: (taskId) =>
-    set((s) => ({
-      blocks: s.blocks.filter((b) => b.linkedTaskId !== taskId),
-      tasks: s.tasks.map((t) => t.id === taskId ? { ...t, scheduled: false, linkedCalendarBlockId: undefined, updatedAt: new Date().toISOString() } : t),
-    })),
+    set((s) => {
+      const blocks = s.blocks.filter((b) => b.linkedTaskId !== taskId)
+      return {
+        blocks,
+        tasks: syncTasksWithBlocks(
+          s.tasks.map((t) => t.id === taskId ? { ...t, updatedAt: new Date().toISOString() } : t),
+          blocks,
+        ),
+      }
+    }),
 
   // ── Apply rebuilt block set (from rebuildDay/rebuildWeek) ─────────────────────
   applyRebuiltBlocks: (blocks) => {
-    // Sync scheduled state on tasks based on new block set
+    set((s) => ({ blocks, tasks: syncTasksWithBlocks(s.tasks, blocks) }))
+  },
+
+  addProtectedWindow: (window) => set((s) => {
+    const now = new Date().toISOString()
+    const protectedWindowId = uid('protected')
+    const blockId = uid('block')
+    const block: CalendarBlock = {
+      id: blockId,
+      title: window.source === 'manual' ? 'Protected Focus' : 'AI Protected Focus',
+      date: window.date,
+      startTime: window.startTime,
+      duration: window.durationMinutes,
+      color: '#9d4edd',
+      type: 'focus',
+      locked: true,
+      flexible: false,
+      recurring: false,
+      source: 'scheduler',
+      protectedWindowId,
+      isProtectedTime: true,
+      protectionSource: window.source,
+      notes: window.rationale,
+      createdAt: now,
+      updatedAt: now,
+    }
+    const protectedWindow: ProtectedWindow = {
+      id: protectedWindowId,
+      blockId,
+      createdAt: now,
+      updatedAt: now,
+      ...window,
+    }
+    const blocks = [...s.blocks, block]
+    return {
+      blocks,
+      protectedWindows: [...s.protectedWindows, protectedWindow],
+      tasks: syncTasksWithBlocks(s.tasks, blocks),
+    }
+  }),
+
+  removeProtectedWindow: (id) => set((s) => {
+    const window = s.protectedWindows.find((entry) => entry.id === id)
+    if (!window) return s
+    const blocks = s.blocks.filter((block) => block.id !== window.blockId)
+    return {
+      blocks,
+      protectedWindows: s.protectedWindows.filter((entry) => entry.id !== id),
+      tasks: syncTasksWithBlocks(s.tasks, blocks),
+    }
+  }),
+
+  // ── Planning execution ────────────────────────────────────────────────────────
+
+  applyPlanningActions: (actions, result, opts) => {
+    const { source, summary, confidence, plannerSource } = opts
+
+    // Execution result is computed inside the set() callback (synchronous)
+    // and captured here so the store action can return it.
+    let executionResult!: ExecutionResult
+
     set((s) => {
-      const linkedTaskIds = new Set(blocks.map((b) => b.linkedTaskId).filter(Boolean) as string[])
-      const updatedTasks = s.tasks.map((t) => {
-        const stillLinked = linkedTaskIds.has(t.id)
-        if (t.scheduled && !stillLinked) {
-          return { ...t, scheduled: false, linkedCalendarBlockId: undefined, updatedAt: new Date().toISOString() }
+      const currentState = { tasks: s.tasks, blocks: s.blocks, protectedWindows: s.protectedWindows }
+
+      // 1. Stamp actions with stable IDs and pre-resolve candidate slots
+      const stamped = stampActions(actions, result)
+
+      // 2. Order by dependency phase
+      const ordered = orderActionsForExecution(stamped)
+
+      // 3. Validate the full batch — conservative policy: skip only invalid actions,
+      //    but allow valid ones through even if some failed validation
+      const validation = validateActions(ordered, currentState)
+
+      if (validation.valid.length === 0) {
+        executionResult = {
+          success: false,
+          appliedActionIds: [],
+          failedActionIds: validation.invalid.map((sa) => sa.actionId),
+          warnings: [
+            ...validation.warnings,
+            ...validation.issues.map((i) => i.reason),
+          ],
+          error: 'No valid actions after pre-flight validation — state unchanged',
+          rollbackAvailable: false,
         }
-        return t
+        return s  // no mutation
+      }
+
+      // 4. Capture snapshot BEFORE any mutation (enables undo)
+      const snapshot = captureSnapshot(currentState, source, summary)
+
+      // 5. Compute next state as a pure transform
+      const applyReport = computeNextState(validation.valid, currentState)
+
+      // 6. Post-apply validation on the proposed new state
+      const postIssues = runPostApplyValidation({
+        tasks: applyReport.newTasks,
+        blocks: applyReport.newBlocks,
+        protectedWindows: applyReport.newProtectedWindows,
       })
-      return { blocks, tasks: updatedTasks }
+
+      // 7. Critical post-apply failure → rollback (don't commit)
+      if (postIssues.criticalFailure) {
+        executionResult = {
+          success: false,
+          appliedActionIds: [],
+          failedActionIds: [
+            ...applyReport.appliedActionIds,
+            ...applyReport.failedActionIds,
+            ...validation.invalid.map((sa) => sa.actionId),
+          ],
+          warnings: [...applyReport.warnings, ...postIssues.warnings],
+          error: 'Post-apply validation detected critical inconsistency — rolled back',
+          rollbackAvailable: false,
+        }
+        return s  // no mutation
+      }
+
+      // 8. Build history entry
+      const historyEntry: ExecutionHistoryEntry = {
+        id: uid('hist'),
+        timestamp: new Date().toISOString(),
+        source,
+        actionCount: applyReport.appliedActionIds.length,
+        summary,
+        confidence,
+        plannerSource,
+        undoAvailable: true,
+      }
+
+      // 9. Atomically commit: new state + snapshot + history
+      executionResult = {
+        success: true,
+        appliedActionIds: applyReport.appliedActionIds,
+        failedActionIds: [
+          ...applyReport.failedActionIds,
+          ...validation.invalid.map((sa) => sa.actionId),
+        ],
+        warnings: [
+          ...applyReport.warnings,
+          ...validation.warnings,
+          ...postIssues.warnings,
+        ],
+        rollbackAvailable: true,
+      }
+
+      return {
+        tasks: applyReport.newTasks,
+        blocks: applyReport.newBlocks,
+        protectedWindows: applyReport.newProtectedWindows,
+        undoSnapshot: snapshot,
+        executionHistory: [historyEntry, ...s.executionHistory].slice(0, EXECUTION_HISTORY_MAX),
+      }
+    })
+
+    return executionResult
+  },
+
+  undoLastPlanningExecution: () => {
+    set((s) => {
+      if (!s.undoSnapshot) return s
+      return {
+        tasks: s.undoSnapshot.tasks,
+        blocks: s.undoSnapshot.blocks,
+        protectedWindows: s.undoSnapshot.protectedWindows,
+        undoSnapshot: null,
+        // Mark the most recent history entry as no longer undoable
+        executionHistory: s.executionHistory.map((e, i) =>
+          i === 0 ? { ...e, undoAvailable: false } : e,
+        ),
+      }
+    })
+  },
+
+  dismissPlanningHistoryEntry: (id) => {
+    set((s) => ({
+      executionHistory: s.executionHistory.filter((e) => e.id !== id),
+    }))
+  },
+
+  // ── Intake creation ───────────────────────────────────────────────────────
+
+  createEventBlockFromIntake: (data) => {
+    set((s) => {
+      const now  = new Date().toISOString()
+      const block: CalendarBlock = {
+        id:         uid('block'),
+        title:      data.title,
+        date:       data.date,
+        startTime:  data.startTime,
+        duration:   data.durationMinutes ?? 60,
+        color:      '#00d4ff',
+        type:       'event',
+        locked:     data.locked,
+        flexible:   false,
+        recurring:  false,
+        source:     'manual',
+        notes:      data.notes,
+        createdAt:  now,
+        updatedAt:  now,
+      }
+      const blocks = [...s.blocks, block]
+      return { blocks, tasks: syncTasksWithBlocks(s.tasks, blocks) }
+    })
+  },
+
+  createTaskFromIntake: (data) => {
+    set((s) => {
+      const now  = new Date().toISOString()
+      const task: Task = {
+        id:                     uid('task'),
+        title:                  data.title,
+        description:            data.notes,
+        status:                 'todo',
+        priority:               (data.priority ?? 'medium') as TaskPriority,
+        dueDate:                data.dueDate ?? undefined,
+        durationMinutes:        data.durationMinutes ?? 60,
+        energyType:             (data.energyType ?? 'moderate') as EnergyType,
+        scheduled:              false,
+        completed:              false,
+        tags:                   [],
+        linkedCalendarBlockIds: [],
+        scheduledMinutes:       0,
+        schedulingProgress:     0,
+        splitAllowed:           false,
+        pinned:                 false,
+        createdAt:              now,
+        updatedAt:              now,
+      }
+      return { tasks: syncTasksWithBlocks([task, ...s.tasks], s.blocks) }
+    })
+  },
+
+  createManyFromIntake: (events, intakeTasks) => {
+    set((s) => {
+      const now = new Date().toISOString()
+
+      const newBlocks: CalendarBlock[] = events.map((e) => ({
+        id:         uid('block'),
+        title:      e.title,
+        date:       e.date,
+        startTime:  e.startTime,
+        duration:   e.durationMinutes ?? 60,
+        color:      '#00d4ff',
+        type:       'event' as BlockType,
+        locked:     e.locked,
+        flexible:   false,
+        recurring:  false,
+        source:     'manual' as BlockSource,
+        notes:      e.notes,
+        createdAt:  now,
+        updatedAt:  now,
+      }))
+
+      const newTasks: Task[] = intakeTasks.map((t) => ({
+        id:                     uid('task'),
+        title:                  t.title,
+        description:            t.notes,
+        status:                 'todo' as TaskStatus,
+        priority:               (t.priority ?? 'medium') as TaskPriority,
+        dueDate:                t.dueDate ?? undefined,
+        durationMinutes:        t.durationMinutes ?? 60,
+        energyType:             (t.energyType ?? 'moderate') as EnergyType,
+        scheduled:              false,
+        completed:              false,
+        tags:                   [],
+        linkedCalendarBlockIds: [],
+        scheduledMinutes:       0,
+        schedulingProgress:     0,
+        splitAllowed:           false,
+        pinned:                 false,
+        createdAt:              now,
+        updatedAt:              now,
+      }))
+
+      const allBlocks = [...s.blocks, ...newBlocks]
+      const allTasks  = syncTasksWithBlocks([...newTasks, ...s.tasks], allBlocks)
+      return { blocks: allBlocks, tasks: allTasks }
     })
   },
 }))
