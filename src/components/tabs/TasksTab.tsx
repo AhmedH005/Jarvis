@@ -26,6 +26,7 @@ import {
 } from 'lucide-react'
 import {
   usePlannerStore,
+  type CalendarBlock,
   type Task,
   type TaskPriority,
   type TaskStatus,
@@ -34,7 +35,18 @@ import {
   today,
 } from '@/store/planner'
 import { suggestPlacement } from '@/features/scheduler/schedulerService'
-import { generatePlannerSummary, summaryToSignals, type PlannerSignal } from '@/features/planner/planningOrchestrator'
+import {
+  generatePlannerSummary,
+  summaryToSignals,
+  buildWeeklyCommentaryAI,
+  interpretTaskAI,
+  recommendSchedulingAI,
+  clearInterpretationCache,
+  type PlannerSignal,
+  type TaskInterpretationResult,
+  type ScheduleRecommendationResult,
+  type WeeklyCommentaryResult,
+} from '@/features/planner/planningOrchestrator'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -422,6 +434,7 @@ function TaskCard({
 
 function TaskInspector({
   task,
+  blocks,
   onClose,
   onComplete,
   onSchedule,
@@ -431,6 +444,7 @@ function TaskInspector({
   onDuplicate,
 }: {
   task: Task
+  blocks: CalendarBlock[]
   onClose: () => void
   onComplete: () => void
   onSchedule: () => void
@@ -439,6 +453,38 @@ function TaskInspector({
   onDelete: () => void
   onDuplicate: () => void
 }) {
+  const [aiInsight, setAiInsight] = useState<TaskInterpretationResult | null>(null)
+  const [analyzing, setAnalyzing] = useState(false)
+  const linkedBlocks = useMemo(
+    () => blocks
+      .filter((block) => task.linkedCalendarBlockIds.includes(block.id))
+      .sort((a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime)),
+    [blocks, task.linkedCalendarBlockIds],
+  )
+  const chunkBreakdown = linkedBlocks.map((block) => `${block.duration}m`).join(' + ')
+
+  // Load AI interpretation when the inspector opens or a new task is selected
+  useEffect(() => {
+    let cancelled = false
+    setAiInsight(null)
+    setAnalyzing(true)
+    interpretTaskAI(task).then((result) => {
+      if (!cancelled) { setAiInsight(result); setAnalyzing(false) }
+    })
+    return () => { cancelled = true }
+  }, [task.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  function handleRefreshInsight() {
+    setAiInsight(null)
+    setAnalyzing(true)
+    clearInterpretationCache(task.id).then(() => {
+      interpretTaskAI(task, { forceRefresh: true }).then((result) => {
+        setAiInsight(result)
+        setAnalyzing(false)
+      })
+    })
+  }
+
   return (
     <motion.div
       initial={{ x: 48, opacity: 0 }}
@@ -554,12 +600,110 @@ function TaskInspector({
         <div>
           <p className="text-[9px] font-mono mb-1" style={{ color: 'rgba(74,122,138,0.5)' }}>CALENDAR</p>
           {task.scheduled ? (
-            <span className="text-[9px] font-mono flex items-center gap-1" style={{ color: '#00d4ff' }}>
-              <Lock className="w-2.5 h-2.5" />
-              Scheduled
-            </span>
+            <div className="space-y-1.5">
+              <span className="text-[9px] font-mono flex items-center gap-1" style={{ color: '#00d4ff' }}>
+                <Lock className="w-2.5 h-2.5" />
+                Scheduled · {task.scheduledMinutes}/{task.durationMinutes}m
+              </span>
+              {linkedBlocks.length > 0 && (
+                <div
+                  className="rounded px-2 py-1.5"
+                  style={{ background: 'rgba(0,212,255,0.05)', border: '1px solid rgba(0,212,255,0.12)' }}
+                >
+                  <p className="text-[8px] font-mono" style={{ color: 'rgba(0,212,255,0.7)' }}>
+                    {linkedBlocks.length > 1 ? `Chunks · ${chunkBreakdown}` : `Block · ${linkedBlocks[0].duration}m`}
+                  </p>
+                  <div className="mt-1 space-y-1">
+                    {linkedBlocks.map((block, index) => (
+                      <div key={block.id} className="flex items-center justify-between gap-2">
+                        <span className="text-[8px] font-mono" style={{ color: 'rgba(192,232,240,0.65)' }}>
+                          {linkedBlocks.length > 1 ? `${index + 1}. ` : ''}{block.date} · {block.startTime}
+                        </span>
+                        <span className="text-[8px] font-mono" style={{ color: 'rgba(0,212,255,0.5)' }}>
+                          {block.duration}m
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
           ) : (
             <span className="text-[9px] font-mono" style={{ color: 'rgba(74,122,138,0.4)' }}>Not scheduled</span>
+          )}
+        </div>
+
+        {/* AI Analysis */}
+        <div
+          className="rounded-md px-2.5 py-2.5 space-y-1.5"
+          style={{ background: 'rgba(157,78,221,0.05)', border: '1px solid rgba(157,78,221,0.15)' }}
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5">
+              <Brain className="w-2.5 h-2.5 flex-shrink-0" style={{ color: '#9d4edd' }} />
+              <span className="text-[8px] font-mono tracking-wider" style={{ color: '#9d4edd' }}>
+                AI ANALYSIS
+                {aiInsight && (
+                  <span style={{ color: 'rgba(157,78,221,0.5)' }}>
+                    {' '}· {aiInsight.source === 'ai' ? `${Math.round(aiInsight.confidence * 100)}%` : 'FALLBACK'}
+                  </span>
+                )}
+              </span>
+            </div>
+            <button
+              onClick={handleRefreshInsight}
+              disabled={analyzing}
+              className="p-0.5 rounded"
+              style={{ color: analyzing ? 'rgba(157,78,221,0.3)' : 'rgba(157,78,221,0.5)' }}
+              title="Re-analyze"
+            >
+              {analyzing
+                ? <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                : <RefreshCw className="w-2.5 h-2.5" />
+              }
+            </button>
+          </div>
+
+          {analyzing && !aiInsight && (
+            <p className="text-[8px] font-mono" style={{ color: 'rgba(157,78,221,0.45)' }}>
+              Analyzing task…
+            </p>
+          )}
+
+          {aiInsight && (
+            <>
+              {/* Inferred values */}
+              {(aiInsight.inferredPriority || aiInsight.inferredEnergyType) && (
+                <div className="flex gap-3">
+                  {aiInsight.inferredPriority && aiInsight.inferredPriority !== task.priority && (
+                    <div>
+                      <p className="text-[7px] font-mono" style={{ color: 'rgba(157,78,221,0.4)' }}>PRIORITY HINT</p>
+                      <span className="text-[9px] font-mono" style={{ color: PRIORITY_COLOR[aiInsight.inferredPriority] }}>
+                        {aiInsight.inferredPriority.toUpperCase()}
+                      </span>
+                    </div>
+                  )}
+                  {aiInsight.inferredEnergyType && aiInsight.inferredEnergyType !== task.energyType && (
+                    <div>
+                      <p className="text-[7px] font-mono" style={{ color: 'rgba(157,78,221,0.4)' }}>ENERGY HINT</p>
+                      <EnergyBadge energy={aiInsight.inferredEnergyType} />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Split recommendation */}
+              {aiInsight.splitRecommendation?.shouldSplit && (
+                <p className="text-[8px] font-mono leading-relaxed" style={{ color: '#ffc84a' }}>
+                  ✂ {aiInsight.splitRecommendation.rationale ?? `Split into ~${aiInsight.splitRecommendation.suggestedChunkMinutes ?? '?'}min chunks`}
+                </p>
+              )}
+
+              {/* Rationale */}
+              <p className="text-[8px] font-mono leading-relaxed" style={{ color: 'rgba(192,232,240,0.5)' }}>
+                {aiInsight.rationale}
+              </p>
+            </>
           )}
         </div>
       </div>
@@ -662,6 +806,9 @@ function AddTaskModal({ onClose, onSave }: { onClose: () => void; onSave: (t: Ta
       tags: [],
       project: project.trim() || undefined,
       splitAllowed: false,
+      linkedCalendarBlockIds: [],
+      scheduledMinutes: 0,
+      schedulingProgress: 0,
       pinned: false,
       createdAt: now,
       updatedAt: now,
@@ -826,20 +973,49 @@ function ScheduleModal({
   onSchedule,
 }: {
   taskTitle: string
-  task?: Pick<Task, 'durationMinutes' | 'energyType' | 'dueDate' | 'priority'>
+  task?: Task
   onClose: () => void
   onSchedule: (date: string, startTime: string) => void
 }) {
   const blocks = usePlannerStore((s) => s.blocks)
 
-  // Compute the AI suggestion once on mount
-  const suggestion = useMemo(() => {
+  // Deterministic suggestion — instant initial value
+  const deterministicSuggestion = useMemo(() => {
     if (!task) return null
     return suggestPlacement(task, blocks)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const [date, setDate] = useState(() => suggestion?.date ?? today())
-  const [time, setTime] = useState(() => suggestion?.startTime ?? '10:00')
+  const [date, setDate] = useState(() => deterministicSuggestion?.date ?? today())
+  const [time, setTime] = useState(() => deterministicSuggestion?.startTime ?? '10:00')
+  const [analyzing, setAnalyzing] = useState(false)
+  const [aiRec, setAiRec] = useState<ScheduleRecommendationResult | null>(null)
+
+  // Fire AI recommendation once on mount via orchestrator (handles rich candidates internally)
+  useEffect(() => {
+    if (!task) return
+    setAnalyzing(true)
+    recommendSchedulingAI(task, blocks)
+      .then((rec) => {
+        setAiRec(rec)
+        // Prefill the form with AI's choice (user can still override)
+        if (rec.suggestedWindow) {
+          setDate(rec.suggestedWindow.date)
+          setTime(rec.suggestedWindow.start)
+        }
+      })
+      .finally(() => setAnalyzing(false))
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const sourceLabel = aiRec
+    ? aiRec.source === 'ai' ? 'AI' : 'SCHEDULER'
+    : deterministicSuggestion?.success ? 'SCHEDULER' : null
+
+  const rationale = aiRec?.rationale
+    ?? (deterministicSuggestion?.success ? deterministicSuggestion.reason : null)
+
+  const confidencePct = aiRec
+    ? Math.round(aiRec.confidence * 100)
+    : null
 
   return (
     <motion.div
@@ -872,23 +1048,41 @@ function ScheduleModal({
 
         <p className="text-[10px] font-mono" style={{ color: 'rgba(192,232,240,0.55)' }}>{taskTitle}</p>
 
-        {/* Scheduler suggestion */}
-        {suggestion?.success && (
-          <div
-            className="px-2.5 py-2 rounded-md"
-            style={{ background: 'rgba(0,212,255,0.05)', border: '1px solid rgba(0,212,255,0.12)' }}
-          >
-            <div className="flex items-center gap-1.5 mb-1">
-              <Sparkles className="w-2.5 h-2.5 flex-shrink-0" style={{ color: '#9d4edd' }} />
+        {/* Suggestion panel — loading → AI result → deterministic fallback */}
+        <div
+          className="px-2.5 py-2 rounded-md min-h-[52px] flex flex-col justify-center"
+          style={{ background: 'rgba(0,212,255,0.05)', border: '1px solid rgba(0,212,255,0.12)' }}
+        >
+          {analyzing ? (
+            <div className="flex items-center gap-2">
+              <Loader2 className="w-2.5 h-2.5 animate-spin flex-shrink-0" style={{ color: '#9d4edd' }} />
               <span className="text-[8px] font-mono tracking-wider" style={{ color: '#9d4edd' }}>
-                SUGGESTED · {suggestion.confidence.toUpperCase()} CONFIDENCE
+                CHOOSING BEST SLOT…
               </span>
             </div>
-            <p className="text-[9px] font-mono leading-relaxed" style={{ color: 'rgba(0,212,255,0.7)' }}>
-              {suggestion.reason}
+          ) : rationale ? (
+            <>
+              <div className="flex items-center gap-1.5 mb-1">
+                <Sparkles className="w-2.5 h-2.5 flex-shrink-0" style={{ color: '#9d4edd' }} />
+                <span className="text-[8px] font-mono tracking-wider" style={{ color: '#9d4edd' }}>
+                  {sourceLabel}{confidencePct !== null ? ` · ${confidencePct}% CONFIDENCE` : ''}
+                </span>
+              </div>
+              <p className="text-[9px] font-mono leading-relaxed" style={{ color: 'rgba(0,212,255,0.7)' }}>
+                {rationale}
+              </p>
+              {aiRec?.warnings && aiRec.warnings.length > 0 && (
+                <p className="text-[8px] font-mono mt-1" style={{ color: '#ffc84a' }}>
+                  ⚠ {aiRec.warnings[0]}
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="text-[8px] font-mono" style={{ color: 'rgba(74,122,138,0.4)' }}>
+              No suggestion available
             </p>
-          </div>
-        )}
+          )}
+        </div>
 
         <div className="space-y-3">
           <div>
@@ -948,6 +1142,7 @@ export function TasksTab() {
   const togglePin = usePlannerStore((s) => s.togglePin)
 
   const [filter, setFilter] = useState<FilterKey>('all')
+  const [aiCommentary, setAiCommentary] = useState<WeeklyCommentaryResult | null>(null)
   const [sort, setSort] = useState<SortKey>('priority')
   const [view, setView] = useState<ViewMode>('list')
   const [search, setSearch] = useState('')
@@ -1019,11 +1214,29 @@ export function TasksTab() {
   const allProjects = useMemo(() => [...new Set(tasks.map((t) => t.project).filter(Boolean) as string[])], [tasks])
   const allTags = useMemo(() => [...new Set(tasks.flatMap((t) => t.tags))], [tasks])
 
+  // ── Weekly AI commentary — loaded once when insights are first shown ──────────
+  const commentaryLoadedRef = useRef(false)
+  useEffect(() => {
+    if (!showInsights || commentaryLoadedRef.current) return
+    commentaryLoadedRef.current = true
+    const summary = generatePlannerSummary(tasks, blocks)
+    buildWeeklyCommentaryAI(summary).then(setAiCommentary)
+  }, [showInsights]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Planner signals ───────────────────────────────────────────────────────────
   const plannerSignals = useMemo<PlannerSignal[]>(() => {
     if (!showInsights) return []
-    return summaryToSignals(generatePlannerSummary(tasks, blocks))
-  }, [tasks, blocks, showInsights])
+    const signals = summaryToSignals(generatePlannerSummary(tasks, blocks))
+    if (aiCommentary) {
+      signals.unshift({
+        id: 'ai-weekly-commentary',
+        type: 'suggestion',
+        message: aiCommentary.summaryText,
+        severity: 'info',
+      })
+    }
+    return signals
+  }, [tasks, blocks, showInsights, aiCommentary])
 
   const selectedTask = selectedId ? tasks.find((t) => t.id === selectedId) ?? null : null
   const scheduleTaskData = scheduleTaskId ? tasks.find((t) => t.id === scheduleTaskId) ?? null : null
@@ -1043,7 +1256,18 @@ export function TasksTab() {
     const task = tasks.find((t) => t.id === id)
     if (!task) return
     const now = new Date().toISOString()
-    addTask({ ...task, id: uid('task'), title: `${task.title} (copy)`, scheduled: false, linkedCalendarBlockId: undefined, createdAt: now, updatedAt: now })
+    addTask({
+      ...task,
+      id: uid('task'),
+      title: `${task.title} (copy)`,
+      scheduled: false,
+      linkedCalendarBlockId: undefined,
+      linkedCalendarBlockIds: [],
+      scheduledMinutes: 0,
+      schedulingProgress: 0,
+      createdAt: now,
+      updatedAt: now,
+    })
   }
 
   function handleUnschedule(id: string) {
@@ -1539,6 +1763,7 @@ export function TasksTab() {
           {selectedTask && (
             <TaskInspector
               task={selectedTask}
+              blocks={blocks}
               onClose={() => setSelectedId(null)}
               onComplete={() => handleComplete(selectedTask.id)}
               onSchedule={() => { setScheduleTaskId(selectedTask.id); setSelectedId(null) }}

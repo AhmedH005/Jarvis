@@ -8,6 +8,7 @@ import {
   Code2,
   LayoutDashboard,
   MessageSquare,
+  Music,
   Sparkles,
   Zap,
 } from 'lucide-react'
@@ -26,6 +27,7 @@ const NAV_ITEMS: { id: TabId; label: string; icon: FC<{ className?: string }>; d
   { id: 'dashboard',   label: 'Dashboard',   icon: LayoutDashboard, description: 'Life overview'         },
   { id: 'concierge',   label: 'Concierge',   icon: Sparkles,        description: 'Proactive assistant'   },
   { id: 'coding',      label: 'Coding Team', icon: Code2,           description: 'Dev agents & projects' },
+  { id: 'music',       label: 'Music Studio', icon: Music,          description: 'AI band & generation'  },
 ]
 
 export function TabNav({ activeTab, onTabChange }: TabNavProps) {

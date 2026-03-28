@@ -46,6 +46,7 @@ export type TabId =
   | 'dashboard'
   | 'concierge'
   | 'coding'
+  | 'music'
 
 export interface TabMeta {
   id: string

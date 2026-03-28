@@ -23,6 +23,25 @@ import type {
   CheckerVerifyRunInput,
   CheckerVerifyRunResult,
 } from '../src/shared/builder-bridge'
+import type {
+  PlannerApplyPlanningActionsPayload,
+  PlannerBridgeResult,
+  PlannerBridgeExecutionResult,
+  PlannerCreateEventPayload,
+  PlannerCreateTaskPayload,
+} from '../src/shared/planner-bridge'
+import type {
+  PhoneDialInput,
+  PhoneDialResult,
+  PhoneCallUpdate,
+  PhoneWebhookConfig,
+} from '../src/shared/phone-bridge'
+import type {
+  GmailFetchResult,
+  GmailSendInput,
+  GmailSendResult,
+  GmailStatus,
+} from '../src/shared/gmail-bridge'
 
 type LegacyTtsSpeakResult =
   | ArrayBuffer
@@ -115,6 +134,16 @@ const jarvisAPI = {
     skills: () => ipcRenderer.invoke('openclaw:skills'),
   },
 
+  telegram: {
+    onMessage: (cb: (message: { chatId: string; text: string; messageId: number; username?: string; firstName?: string }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, message: { chatId: string; text: string; messageId: number; username?: string; firstName?: string }) => cb(message)
+      ipcRenderer.on('telegram:message', handler)
+      return () => ipcRenderer.removeListener('telegram:message', handler)
+    },
+    reply: (chatId: string, text: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('telegram:reply', { chatId, text }),
+  },
+
   // ── Shell ────────────────────────────────────────────────────────────────────
   shell: {
     open: (url: string) => ipcRenderer.invoke('shell:open', url),
@@ -176,14 +205,117 @@ const jarvisAPI = {
     },
   },
 
+  // ── Planner bridge ────────────────────────────────────────────────────────────
+  planner: {
+    /** Verify the fixed Electron planner bridge is reachable. */
+    ping: (): Promise<PlannerBridgeResult> =>
+      ipcRenderer.invoke('planner:ping'),
+
+    /** Create a calendar event block in the live planner store. */
+    createEvent: (data: PlannerCreateEventPayload): Promise<PlannerBridgeResult> =>
+      ipcRenderer.invoke('planner:createEvent', data),
+
+    /** Create a planner task in the live planner store. */
+    createTask: (data: PlannerCreateTaskPayload): Promise<PlannerBridgeResult> =>
+      ipcRenderer.invoke('planner:createTask', data),
+
+    /** Create events/tasks atomically from intake parsing. */
+    createManyFromIntake: (
+      events: PlannerCreateEventPayload[],
+      tasks: PlannerCreateTaskPayload[],
+    ): Promise<PlannerBridgeResult> =>
+      ipcRenderer.invoke('planner:createManyFromIntake', { events, tasks }),
+
+    /** Return all calendar blocks from the live planner store. */
+    listEvents: (): Promise<PlannerBridgeResult<unknown[]>> =>
+      ipcRenderer.invoke('planner:listEvents'),
+
+    /** Patch an existing calendar block by id. */
+    updateEvent: (id: string, patch: Record<string, unknown>): Promise<PlannerBridgeResult> =>
+      ipcRenderer.invoke('planner:updateEvent', { id, ...patch }),
+
+    /** Delete a calendar block by id. */
+    deleteEvent: (id: string): Promise<PlannerBridgeResult> =>
+      ipcRenderer.invoke('planner:deleteEvent', { id }),
+
+    /** Apply a planner result against the live planner store. */
+    applyPlanningActions: (
+      payload: PlannerApplyPlanningActionsPayload
+    ): Promise<PlannerBridgeResult<PlannerBridgeExecutionResult>> =>
+      ipcRenderer.invoke('planner:applyPlanningActions', payload),
+
+    /**
+     * Internal: renderer-side listener for bridge commands issued by main.
+     * The TelegramPlannerBridge (or any store-aware component) subscribes here,
+     * executes the requested store action, and calls _bridgeResult with the outcome.
+     * Returns an unsubscribe function.
+     */
+    _onBridgeCommand: (
+      cb: (cmd: { id: string; method: string; data: unknown }) => void
+    ): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, cmd: { id: string; method: string; data: unknown }) => cb(cmd)
+      ipcRenderer.on('planner:bridge:command', handler)
+      return () => ipcRenderer.removeListener('planner:bridge:command', handler)
+    },
+
+    /** Internal: send the result of a bridge command back to main. */
+    _bridgeResult: (id: string, result: PlannerBridgeResult): void => {
+      ipcRenderer.send('planner:bridge:result', { id, result })
+    },
+  },
+
+  // ── Music generation ─────────────────────────────────────────────────────────
+  music: {
+    /** Generate audio from a text prompt via ElevenLabs Sound Generation. */
+    generate: (prompt: string): Promise<
+      | { ok: true; mimeType: string; audioBase64: string; bytes: number }
+      | { ok: false; error: string; status?: number }
+    > => ipcRenderer.invoke('music:generate', { prompt }),
+  },
+
   // ── TTS ──────────────────────────────────────────────────────────────────────
   tts: {
     /** Returns ElevenLabs speech audio or an error payload from the main process. */
     speak: (text: string): Promise<TtsSpeakResult | null> =>
       ipcRenderer.invoke('tts:speak', { text }),
   },
+
+  // ── Phone ─────────────────────────────────────────────────────────────────────
+  phone: {
+    /**
+     * Place an approved outbound call via Twilio.
+     * Called by phoneWorker.executeOutboundCall() after approval is granted.
+     */
+    dial: (input: PhoneDialInput): Promise<PhoneDialResult> =>
+      ipcRenderer.invoke('phone:dial', input),
+
+    /**
+     * Subscribe to call status updates pushed from main (Twilio webhooks).
+     * Returns an unsubscribe function.
+     */
+    onCallUpdate: (cb: (update: PhoneCallUpdate) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, update: PhoneCallUpdate) => cb(update)
+      ipcRenderer.on('phone:callUpdate', handler)
+      return () => ipcRenderer.removeListener('phone:callUpdate', handler)
+    },
+
+    /** Get the webhook server config (port, public URL, credentials status). */
+    getWebhookConfig: (): Promise<PhoneWebhookConfig> =>
+      ipcRenderer.invoke('phone:webhook:config'),
+  },
+
+  // ── Gmail ─────────────────────────────────────────────────────────────────────
+  gmail: {
+    fetchRecent: (): Promise<GmailFetchResult> =>
+      ipcRenderer.invoke('gmail:fetchRecent'),
+    sendMessage: (input: GmailSendInput): Promise<GmailSendResult> =>
+      ipcRenderer.invoke('gmail:sendMessage', input),
+    status: (): Promise<GmailStatus> =>
+      ipcRenderer.invoke('gmail:status'),
+  },
 }
 
 contextBridge.exposeInMainWorld('jarvis', jarvisAPI)
+contextBridge.exposeInMainWorld('electronAPI', jarvisAPI)
 
 export type JarvisAPI = typeof jarvisAPI

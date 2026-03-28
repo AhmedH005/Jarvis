@@ -63,8 +63,18 @@ export async function handlePlannerCommand(input: string, context: PlannerContex
 export function isPlannerIntent(input: string): boolean {
   const normalized = input.toLowerCase()
   return [
-    'schedule', 'optimize', 'rearrange', 'calendar', 'plan',
-    'protect', 'focus', 'fix my', 'rebuild', 'plan my',
+    'schedule my',
+    'schedule unscheduled',
+    'schedule all tasks',
+    'optimize',
+    'rearrange',
+    'protect focus',
+    'protect deep work',
+    'protect my focus',
+    'protect time',
+    'fix my',
+    'rebuild',
+    'plan my',
   ].some((keyword) => normalized.includes(keyword))
 }
 
@@ -88,7 +98,15 @@ function parsePlannerCommand(input: string, context: PlannerContext): PlannerCom
     return { type: 'optimize_day', date: targetDate }
   }
 
-  if (matchesAny(normalized, ['schedule my tasks', 'fit unscheduled tasks', 'schedule unscheduled', 'schedule all tasks'])) {
+  if (matchesAny(normalized, [
+    'schedule my tasks',
+    'fit unscheduled tasks',
+    'schedule unscheduled',
+    'schedule all tasks',
+    'schedule my unscheduled tasks',
+    'unscheduled tasks around my meetings',
+    'schedule my unscheduled tasks around my meetings',
+  ])) {
     return { type: 'schedule_unscheduled', date: normalized.includes('today') || normalized.includes('tomorrow') ? targetDate : undefined }
   }
 

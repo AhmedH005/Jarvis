@@ -6,6 +6,7 @@ import { Background } from '@/components/hud/Background'
 import { BootOverlay } from '@/components/hud/BootOverlay'
 import { TitleBar } from '@/components/hud/TitleBar'
 import { TabShell } from '@/components/tabs/TabShell'
+import { TelegramPlannerBridge } from '@/components/telegram/TelegramPlannerBridge'
 import { IdleScreen } from '@/screens/IdleScreen'
 import { getReactorDisplayStatus } from '@/lib/reactor-display'
 import { useJarvisGreeting } from '@/hooks/useJarvisGreeting'
@@ -70,6 +71,7 @@ export default function App() {
 
   return (
     <div className="relative flex h-screen flex-col overflow-hidden" style={{ background: '#0a0a0f' }}>
+      <TelegramPlannerBridge />
       <Background />
 
       <AnimatePresence mode="wait">

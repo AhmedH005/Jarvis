@@ -18,6 +18,7 @@
 import type { Task, CalendarBlock, TaskPriority, EnergyType } from '@/store/planner'
 import { today, addDays } from '@/lib/dateUtils'
 import { detectConflicts, getAvailableSlots, getWorkloadSummary, DEFAULT_CONSTRAINTS } from '@/features/scheduler/schedulerService'
+import type { ActiveRefinementConstraints } from './plannerRefinementTypes'
 
 // ── AI output interfaces ───────────────────────────────────────────────────────
 
@@ -59,6 +60,7 @@ export interface PlannerSummary {
   overloadedDays: string[]
   unscheduledCriticalTasks: Task[]
   focusWindowSuggestions: FocusWindowSuggestion[]
+  protectedDays: string[]
   riskFlags: RiskFlag[]
   weeklyCommentary: string
   generatedAt: string
@@ -92,6 +94,7 @@ export function generatePlannerSummary(tasks: Task[], blocks: CalendarBlock[]): 
   )
 
   const focusWindowSuggestions = buildFocusWindowSuggestions(tasks, blocks, td, weekEnd)
+  const protectedDays = [...new Set(blocks.filter((block) => block.isProtectedTime).map((block) => block.date))].sort()
   const riskFlags = buildRiskFlags(tasks, blocks, td)
   const weeklyCommentary = buildWeeklyCommentary(tasks, blocks, overloadedDays, unscheduledCriticalTasks, focusWindowSuggestions)
 
@@ -99,6 +102,7 @@ export function generatePlannerSummary(tasks: Task[], blocks: CalendarBlock[]): 
     overloadedDays,
     unscheduledCriticalTasks,
     focusWindowSuggestions,
+    protectedDays,
     riskFlags,
     weeklyCommentary,
     generatedAt: new Date().toISOString(),
@@ -144,6 +148,15 @@ export function summaryToSignals(summary: PlannerSummary): PlannerSignal[] {
       severity: 'info',
       actionLabel: 'Block it',
       actionData: { date: fw.date, startTime: fw.startTime, duration: fw.durationMinutes },
+    })
+  }
+
+  if (summary.protectedDays.length > 0) {
+    signals.push({
+      id: 'protected-days',
+      type: 'focus-window',
+      message: `${summary.protectedDays.length} day${summary.protectedDays.length > 1 ? 's' : ''} already protected for focus`,
+      severity: 'info',
     })
   }
 
@@ -203,9 +216,11 @@ export function recommendScheduling(tasks: Task[], blocks: CalendarBlock[]): Sch
     .filter((t) => !t.completed)
     .map((task) => {
       if (task.scheduled) {
-        // Check if the linked block is still in the future
-        const linkedBlock = blocks.find((b) => b.id === task.linkedCalendarBlockId)
-        if (linkedBlock && linkedBlock.date < today()) {
+        const linkedBlocks = blocks
+          .filter((block) => task.linkedCalendarBlockIds.includes(block.id))
+          .sort((a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime))
+        const firstLinkedBlock = linkedBlocks[0]
+        if (firstLinkedBlock && firstLinkedBlock.date < today()) {
           return {
             taskId: task.id,
             recommendedAction: 'move' as const,
@@ -219,7 +234,9 @@ export function recommendScheduling(tasks: Task[], blocks: CalendarBlock[]): Sch
           taskId: task.id,
           recommendedAction: 'schedule' as const,
           suggestedWindow: null,
-          rationale: 'Task is already scheduled.',
+          rationale: linkedBlocks.length > 1
+            ? `Task is already split across ${linkedBlocks.length} scheduled chunks.`
+            : 'Task is already scheduled.',
           confidence: 'high' as const,
           warnings: [],
         }
@@ -347,4 +364,151 @@ function formatDateLabel(dateStr: string): string {
   if (dateStr === td) return 'today'
   if (dateStr === addDays(td, 1)) return 'tomorrow'
   return new Date(dateStr + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+}
+
+// ── AI-powered async public API ────────────────────────────────────────────────
+//
+// This is the ONLY surface that UI code should import from.
+// Adapter internals are imported lazily to keep the sync orchestrator fast.
+
+// ── Type re-exports ──────────────────────────────────────────────────────────
+
+export type {
+  TaskInterpretationResult,
+  ScheduleRecommendationResult,
+  WeeklyCommentaryResult,
+} from './openclawPlanningAdapter'
+
+export type {
+  EnrichedCandidateSlot,
+  PlanningAction,
+  ActionScheduleTask,
+  ActionMoveBlock,
+  ActionDeferTask,
+  ActionLockBlock,
+  ActionFlagRisk,
+  ActionSplitTask,
+  ActionProtectFocusWindow,
+  ActionPreserveBlock,
+  OptimizeDayResult,
+  OptimizeWeekResult,
+} from './planningTypes'
+
+export type {
+  ExecutionResult,
+  ExecutionSnapshot,
+  ExecutionHistoryEntry,
+  ExecutionSource,
+  StampedPlanningAction,
+  PostApplyIssues,
+} from './planningExecution'
+
+// ── Core AI planning functions ────────────────────────────────────────────────
+
+/**
+ * AI task interpretation.
+ * Returns inferred priority, energy type, split recommendation, rationale, confidence.
+ * Falls back to heuristics if OpenClaw is unavailable.
+ *
+ * @param context.forceRefresh  bypass the 5-minute session cache
+ */
+export async function interpretTaskAI(
+  task: Task,
+  context?: { forceRefresh?: boolean },
+): Promise<import('./openclawPlanningAdapter').TaskInterpretationResult> {
+  const { interpretTaskWithAICached } = await import('./openclawPlanningAdapter')
+  return interpretTaskWithAICached(task, context?.forceRefresh === true)
+}
+
+/**
+ * Clear the task interpretation cache.
+ * Pass a taskId to clear only that task; omit to clear all.
+ */
+export async function clearInterpretationCache(taskId?: string): Promise<void> {
+  const { clearTaskInterpretationCache } = await import('./openclawPlanningAdapter')
+  clearTaskInterpretationCache(taskId)
+}
+
+/**
+ * AI-assisted schedule recommendation for a single task.
+ *
+ * Generates valid candidate slots deterministically (using suggestPlacement),
+ * then asks OpenClaw to rank them. The AI can only select from the candidate list —
+ * it cannot invent slots. Falls back to the top deterministic suggestion on failure.
+ */
+export async function recommendSchedulingAI(
+  task: Task,
+  blocks: CalendarBlock[],
+  refinementConstraints?: ActiveRefinementConstraints,
+): Promise<import('./openclawPlanningAdapter').ScheduleRecommendationResult> {
+  const { generateRichCandidateSlots, recommendSchedulingWithAI } = await import('./openclawPlanningAdapter')
+  // Use rich candidates (up to 8 slots, 7-day search) for better AI context
+  const richCandidates = generateRichCandidateSlots(task, blocks, { maxSlots: 8, refinementConstraints })
+  // Convert to TimeSlot[] for the schedule recommendation function
+  const candidates = richCandidates.map((c) => ({
+    date: c.date,
+    startTime: c.startTime,
+    endTime: c.endTime,
+    durationMinutes: c.durationMinutes,
+  }))
+  return recommendSchedulingWithAI(task, candidates)
+}
+
+/**
+ * AI-generated weekly commentary.
+ * Narrates deterministic planner facts — it does not replace them.
+ * Produces keyRisks, keyOpportunities, suggestedFocus, and a summaryText.
+ */
+export async function buildWeeklyCommentaryAI(
+  summary: PlannerSummary,
+): Promise<import('./openclawPlanningAdapter').WeeklyCommentaryResult> {
+  const { buildWeeklyCommentaryWithAI } = await import('./openclawPlanningAdapter')
+  return buildWeeklyCommentaryWithAI(summary)
+}
+
+// ── Action-level planning ─────────────────────────────────────────────────────
+
+/**
+ * AI-powered day optimization.
+ *
+ * Process:
+ * 1. Identifies unscheduled tasks due on or before the target date
+ * 2. Generates rich candidate slots for each task (deterministic, no AI involvement)
+ * 3. Sends task list + candidate list to OpenClaw
+ * 4. AI returns schedule_task / defer_task / flag_risk actions with candidate indices
+ * 5. Each action is validated against the candidate list (index bounds, task ID match,
+ *    no double-booking, no past dates)
+ * 6. Invalid actions are stripped; valid actions are returned as OptimizeDayResult
+ * 7. Falls back to deterministic rebuildDay if AI fails or returns no valid actions
+ *
+ * Store mutations are NOT performed here — the caller applies actions explicitly.
+ */
+export async function optimizeDayAI(
+  date: string,
+  tasks: Task[],
+  blocks: CalendarBlock[],
+  refinementConstraints?: ActiveRefinementConstraints,
+): Promise<import('./planningTypes').OptimizeDayResult> {
+  const { optimizeDayWithAI } = await import('./openclawPlanningAdapter')
+  return optimizeDayWithAI(date, tasks, blocks, refinementConstraints)
+}
+
+/**
+ * Week optimization (deterministic fallback — AI week optimization is deferred).
+ *
+ * Uses rebuildWeek deterministically across 7 days from weekStart, converting the
+ * result to a structured OptimizeWeekResult with per-day action lists and candidate
+ * slot arrays. The UI can preview and apply these actions.
+ *
+ * Full AI week optimization (single batch call or per-day AI) is a future improvement
+ * deferred to avoid 7-call sequential queue depth (~3–4 min worst case).
+ */
+export async function optimizeWeekAI(
+  weekStart: string,
+  tasks: Task[],
+  blocks: CalendarBlock[],
+  refinementConstraints?: ActiveRefinementConstraints,
+): Promise<import('./planningTypes').OptimizeWeekResult> {
+  const { optimizeWeekWithAI } = await import('./openclawPlanningAdapter')
+  return optimizeWeekWithAI(weekStart, tasks, blocks, refinementConstraints)
 }

@@ -1,4 +1,17 @@
-import { useState, useMemo, useRef, useEffect } from 'react'
+/**
+ * @deprecated LEGACY — NewCalendarTab is no longer used in the app.
+ *
+ * Replaced by: src/components/tabs/CalendarTab.tsx
+ * New calendar action API: src/calendar/calendarActions.ts
+ * New event model: src/calendar/calendarTypes.ts
+ * New NLP layer: src/calendar/calendarNLP.ts
+ *
+ * This file is preserved for reference only.
+ * Do NOT add new features here. Do NOT import this in TabShell.
+ * Can be deleted once the new CalendarTab is confirmed stable.
+ */
+
+import { useState, useMemo, useRef, useEffect, type PointerEvent as ReactPointerEvent } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Brain,
@@ -8,10 +21,12 @@ import {
   ChevronRight,
   Clock,
   Link2,
+  Loader2,
   Lock,
   LockOpen,
   Plus,
   RefreshCw,
+  Shield,
   Sparkles,
   Trash2,
   Wand2,
@@ -22,18 +37,37 @@ import {
   usePlannerStore,
   type CalendarBlock,
   type BlockType,
+  type ProtectedWindow,
   type Task,
   uid,
   today,
   addDays,
 } from '@/store/planner'
 import { detectConflicts, rebuildDay, type ConflictInfo } from '@/features/scheduler/schedulerService'
-import { generatePlannerSummary, summaryToSignals, type PlannerSignal } from '@/features/planner/planningOrchestrator'
+import {
+  generatePlannerSummary,
+  summaryToSignals,
+  buildWeeklyCommentaryAI,
+  recommendSchedulingAI,
+  optimizeDayAI,
+  optimizeWeekAI,
+  type PlannerSignal,
+  type WeeklyCommentaryResult,
+  type ScheduleRecommendationResult,
+  type OptimizeDayResult,
+  type OptimizeWeekResult,
+  type ExecutionHistoryEntry,
+} from '@/features/planner/planningOrchestrator'
+import { syncTaskWithBlocks } from '@/features/planner/plannerStateUtils'
+import { OptimizePreviewPanel } from '@/features/planner/OptimizePreviewPanel'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const HOURS = Array.from({ length: 15 }, (_, i) => i + 7) // 7–21
 const HOUR_HEIGHT = 52 // px per hour
+const GRID_START_MINUTES = 7 * 60
+const GRID_END_MINUTES = 21 * 60
+const DRAG_SNAP_MINUTES = 15
 
 const BLOCK_COLORS: Record<BlockType, string> = {
   event: '#00d4ff',
@@ -73,8 +107,53 @@ function blockHeight(duration: number): number {
   return Math.max((duration / 60) * HOUR_HEIGHT, 24)
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max)
+}
+
+function timeToMinutes(time: string): number {
+  const [hours, minutes] = time.split(':').map(Number)
+  return (hours * 60) + minutes
+}
+
+function minutesToTime(totalMinutes: number): string {
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`
+}
+
+function snapMinutes(totalMinutes: number): number {
+  return Math.round(totalMinutes / DRAG_SNAP_MINUTES) * DRAG_SNAP_MINUTES
+}
+
 function dayLabel(dateStr: string): string {
   return new Date(dateStr + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+}
+
+function getNextPremiumFreeWindow(date: string, blocks: CalendarBlock[]): {
+  date: string
+  startTime: string
+  endTime: string
+  durationMinutes: number
+} | null {
+  const windows = [
+    { date, startTime: '09:00', endTime: '12:00', durationMinutes: 180 },
+    { date, startTime: '13:30', endTime: '16:00', durationMinutes: 150 },
+  ]
+  const dayBlocks = blocks.filter((block) => block.date === date)
+  const asMinutes = (time: string) => {
+    const [hours, minutes] = time.split(':').map(Number)
+    return (hours * 60) + minutes
+  }
+  return windows.find((window) => {
+    const windowStart = asMinutes(window.startTime)
+    const windowEnd = asMinutes(window.endTime)
+    return !dayBlocks.some((block) => {
+      const blockStart = asMinutes(block.startTime)
+      const blockEnd = blockStart + block.duration
+      return blockStart < windowEnd && blockEnd > windowStart
+    })
+  }) ?? null
 }
 
 // ── Mini month calendar ───────────────────────────────────────────────────────
@@ -186,16 +265,27 @@ function BlockChip({
   block,
   selected,
   hasConflict = false,
-  onClick,
+  related = false,
+  previewDate,
+  previewStartTime,
+  previewDuration,
+  onPointerStart,
+  onSelect,
 }: {
   block: CalendarBlock
   selected: boolean
   hasConflict?: boolean
-  onClick: () => void
+  related?: boolean
+  previewDate?: string
+  previewStartTime?: string
+  previewDuration?: number
+  onPointerStart: (block: CalendarBlock, mode: 'move' | 'resize', event: ReactPointerEvent<HTMLDivElement | HTMLButtonElement>) => void
+  onSelect: () => void
 }) {
   const color = hasConflict ? '#ff6b35' : BLOCK_COLORS[block.type]
-  const top = blockTop(block.startTime)
-  const height = blockHeight(block.duration)
+  const top = blockTop(previewStartTime ?? block.startTime)
+  const height = blockHeight(previewDuration ?? block.duration)
+  const isPreviewing = previewDate !== undefined || previewStartTime !== undefined || previewDuration !== undefined
 
   return (
     <motion.div
@@ -204,15 +294,18 @@ function BlockChip({
       animate={{ opacity: 1, scale: 1 }}
       exit={{ opacity: 0, scale: 0.95 }}
       transition={{ duration: 0.12 }}
-      onClick={(e) => { e.stopPropagation(); onClick() }}
+      onPointerDown={(event) => onPointerStart(block, 'move', event)}
+      onClick={(event) => { event.stopPropagation(); onSelect() }}
       className="absolute left-0.5 right-0.5 rounded px-1.5 py-0.5 cursor-pointer overflow-hidden group"
       style={{
         top,
         height,
         background: hasConflict ? 'rgba(255,107,53,0.12)' : `${BLOCK_COLORS[block.type]}18`,
-        border: selected ? `1px solid ${color}` : block.locked ? `1px dashed ${color}55` : `1px solid ${color}44`,
-        boxShadow: selected ? `0 0 8px ${color}44` : hasConflict ? '0 0 6px rgba(255,107,53,0.3)' : 'none',
+        border: selected ? `1px solid ${color}` : related ? `1px solid ${color}77` : block.locked ? `1px dashed ${color}55` : `1px solid ${color}44`,
+        boxShadow: selected ? `0 0 8px ${color}44` : related ? `0 0 6px ${color}22` : hasConflict ? '0 0 6px rgba(255,107,53,0.3)' : 'none',
+        opacity: isPreviewing ? 0.88 : 1,
         zIndex: selected ? 10 : 1,
+        touchAction: 'none',
       }}
     >
       <div className="flex items-center gap-1 truncate">
@@ -232,10 +325,25 @@ function BlockChip({
             {BLOCK_TYPE_LABELS[block.type]}
           </span>
           <span className="text-[7px] font-mono" style={{ color: `${color}88` }}>
-            {block.duration}m
+            {previewDuration ?? block.duration}m
           </span>
         </div>
       )}
+      <button
+        type="button"
+        onPointerDown={(event) => {
+          event.stopPropagation()
+          onPointerStart(block, 'resize', event)
+        }}
+        className="absolute left-1/2 -translate-x-1/2 bottom-0.5 h-2.5 w-8 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+        style={{
+          background: `${color}33`,
+          border: `1px solid ${color}66`,
+          cursor: 'ns-resize',
+          touchAction: 'none',
+        }}
+        title="Drag to resize"
+      />
     </motion.div>
   )
 }
@@ -245,16 +353,20 @@ function BlockChip({
 function BlockInspector({
   block,
   linkedTask,
+  protectedWindow,
   onClose,
   onDelete,
   onUnlink,
+  onRemoveProtection,
   onUpdate,
 }: {
   block: CalendarBlock
   linkedTask: Task | undefined
+  protectedWindow?: ProtectedWindow
   onClose: () => void
   onDelete: () => void
   onUnlink: () => void
+  onRemoveProtection: () => void
   onUpdate: (patch: Partial<CalendarBlock>) => void
 }) {
   const [editingTitle, setEditingTitle] = useState(false)
@@ -385,6 +497,21 @@ function BlockInspector({
           </div>
         )}
 
+        {protectedWindow && (
+          <div>
+            <p className="text-[9px] font-mono mb-1" style={{ color: 'rgba(74,122,138,0.5)' }}>PROTECTED WINDOW</p>
+            <div
+              className="flex items-center justify-between gap-2 px-2 py-1.5 rounded"
+              style={{ background: 'rgba(157,78,221,0.08)', border: '1px solid rgba(157,78,221,0.18)' }}
+            >
+              <span className="text-[8px] font-mono" style={{ color: '#9d4edd' }}>
+                {protectedWindow.source.toUpperCase()} · {protectedWindow.startTime}–{protectedWindow.endTime}
+              </span>
+              <Shield className="w-2.5 h-2.5 flex-shrink-0" style={{ color: '#9d4edd' }} />
+            </div>
+          </div>
+        )}
+
         {/* Notes */}
         <div>
           <p className="text-[9px] font-mono mb-1" style={{ color: 'rgba(74,122,138,0.5)' }}>NOTES</p>
@@ -436,6 +563,16 @@ function BlockInspector({
           >
             <Link2 className="w-3 h-3" />
             UNLINK TASK
+          </button>
+        )}
+        {protectedWindow && (
+          <button
+            onClick={onRemoveProtection}
+            className="w-full py-1.5 rounded text-[9px] font-mono tracking-wider flex items-center justify-center gap-1.5"
+            style={{ background: 'rgba(157,78,221,0.08)', border: '1px solid rgba(157,78,221,0.2)', color: '#9d4edd' }}
+          >
+            <Shield className="w-3 h-3" />
+            REMOVE PROTECTION
           </button>
         )}
         <button
@@ -631,19 +768,41 @@ function AddEventModal({
   )
 }
 
-// ── ScheduleModal (quick schedule from sidebar) ───────────────────────────────
+// ── ScheduleModal (AI-powered — consistent with TasksTab) ─────────────────────
 
 function ScheduleModal({
-  taskTitle,
+  task,
   onClose,
   onSchedule,
 }: {
-  taskTitle: string
+  task: Task
   onClose: () => void
   onSchedule: (date: string, startTime: string) => void
 }) {
+  const blocks = usePlannerStore((s) => s.blocks)
+
   const [date, setDate] = useState(today())
   const [time, setTime] = useState('10:00')
+  const [analyzing, setAnalyzing] = useState(false)
+  const [aiRec, setAiRec] = useState<ScheduleRecommendationResult | null>(null)
+
+  // Fire AI recommendation once on mount
+  useEffect(() => {
+    setAnalyzing(true)
+    recommendSchedulingAI(task, blocks)
+      .then((rec) => {
+        setAiRec(rec)
+        if (rec.suggestedWindow) {
+          setDate(rec.suggestedWindow.date)
+          setTime(rec.suggestedWindow.start)
+        }
+      })
+      .finally(() => setAnalyzing(false))
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const rationale = aiRec?.rationale ?? null
+  const sourceLabel = aiRec ? (aiRec.source === 'ai' ? 'AI' : 'SCHEDULER') : null
+  const confidencePct = aiRec ? Math.round(aiRec.confidence * 100) : null
 
   return (
     <motion.div
@@ -674,7 +833,35 @@ function ScheduleModal({
           </button>
         </div>
 
-        <p className="text-[10px] font-mono" style={{ color: 'rgba(192,232,240,0.55)' }}>{taskTitle}</p>
+        <p className="text-[10px] font-mono" style={{ color: 'rgba(192,232,240,0.55)' }}>{task.title}</p>
+
+        {/* AI recommendation panel */}
+        <div
+          className="px-2.5 py-2 rounded-md min-h-[48px] flex flex-col justify-center"
+          style={{ background: 'rgba(0,212,255,0.05)', border: '1px solid rgba(0,212,255,0.12)' }}
+        >
+          {analyzing ? (
+            <div className="flex items-center gap-2">
+              <Loader2 className="w-2.5 h-2.5 animate-spin flex-shrink-0" style={{ color: '#9d4edd' }} />
+              <span className="text-[8px] font-mono tracking-wider" style={{ color: '#9d4edd' }}>CHOOSING BEST SLOT…</span>
+            </div>
+          ) : rationale ? (
+            <>
+              <div className="flex items-center gap-1.5 mb-1">
+                <Sparkles className="w-2.5 h-2.5 flex-shrink-0" style={{ color: '#9d4edd' }} />
+                <span className="text-[8px] font-mono tracking-wider" style={{ color: '#9d4edd' }}>
+                  {sourceLabel}{confidencePct !== null ? ` · ${confidencePct}%` : ''}
+                </span>
+              </div>
+              <p className="text-[9px] font-mono leading-relaxed" style={{ color: 'rgba(0,212,255,0.7)' }}>{rationale}</p>
+              {aiRec?.warnings?.[0] && (
+                <p className="text-[8px] font-mono mt-1" style={{ color: '#ffc84a' }}>⚠ {aiRec.warnings[0]}</p>
+              )}
+            </>
+          ) : (
+            <p className="text-[8px] font-mono" style={{ color: 'rgba(74,122,138,0.4)' }}>No suggestion available</p>
+          )}
+        </div>
 
         <div className="space-y-3">
           <div>
@@ -727,19 +914,35 @@ function TimeGrid({
   days,
   blocks,
   selectedId,
+  relatedBlockIds,
   currentTimeDate,
   conflictIds,
   onBlockClick,
+  onBlockManipulate,
 }: {
   days: string[]
   blocks: CalendarBlock[]
   selectedId: string | null
+  relatedBlockIds: Set<string>
   currentTimeDate: string
   conflictIds?: Set<string>
   onBlockClick: (id: string) => void
+  onBlockManipulate: (id: string, patch: Partial<CalendarBlock>) => void
 }) {
   const td = today()
   const gridRef = useRef<HTMLDivElement>(null)
+  const [dragPreview, setDragPreview] = useState<{ blockId: string; date: string; startTime: string; duration: number } | null>(null)
+  const dragStateRef = useRef<{
+    block: CalendarBlock
+    mode: 'move' | 'resize'
+    startX: number
+    startY: number
+    originDate: string
+    originStartMinutes: number
+    originDuration: number
+    moved: boolean
+  } | null>(null)
+  const suppressClickRef = useRef(false)
 
   // Scroll to current time on mount
   useEffect(() => {
@@ -753,6 +956,109 @@ function TimeGrid({
     const now = new Date()
     return ((now.getHours() - 7) + now.getMinutes() / 60) * HOUR_HEIGHT
   }, [])
+
+  useEffect(() => {
+    function handlePointerMove(event: PointerEvent) {
+      const dragState = dragStateRef.current
+      const grid = gridRef.current
+      if (!dragState || !grid) return
+
+      const minutesPerPixel = 60 / HOUR_HEIGHT
+      const deltaYMinutes = snapMinutes((event.clientY - dragState.startY) * minutesPerPixel)
+      const maxStartMinutes = GRID_END_MINUTES - (dragState.mode === 'resize' ? 15 : dragState.originDuration)
+
+      let nextDate = dragState.originDate
+      let nextStartMinutes = dragState.originStartMinutes
+      let nextDuration = dragState.originDuration
+
+      if (dragState.mode === 'move') {
+        const columnWidth = grid.scrollWidth / Math.max(days.length, 1)
+        const deltaColumns = columnWidth > 0 ? Math.round((event.clientX - dragState.startX) / columnWidth) : 0
+        const originIndex = days.findIndex((day) => day === dragState.originDate)
+        const nextIndex = clamp(originIndex + deltaColumns, 0, days.length - 1)
+        nextDate = days[nextIndex] ?? dragState.originDate
+        nextStartMinutes = clamp(
+          snapMinutes(dragState.originStartMinutes + deltaYMinutes),
+          GRID_START_MINUTES,
+          maxStartMinutes,
+        )
+      } else {
+        nextDuration = clamp(
+          snapMinutes(dragState.originDuration + deltaYMinutes),
+          15,
+          GRID_END_MINUTES - dragState.originStartMinutes,
+        )
+      }
+
+      if (Math.abs(event.clientX - dragState.startX) > 4 || Math.abs(event.clientY - dragState.startY) > 4) {
+        dragState.moved = true
+      }
+
+      setDragPreview({
+        blockId: dragState.block.id,
+        date: nextDate,
+        startTime: minutesToTime(nextStartMinutes),
+        duration: nextDuration,
+      })
+    }
+
+    function handlePointerUp() {
+      const dragState = dragStateRef.current
+      const preview = dragPreview
+      if (!dragState) return
+
+      if (!dragState.moved) {
+        suppressClickRef.current = false
+        onBlockClick(dragState.block.id)
+      } else if (preview && preview.blockId === dragState.block.id) {
+        suppressClickRef.current = true
+        onBlockManipulate(dragState.block.id, {
+          date: preview.date,
+          startTime: preview.startTime,
+          duration: preview.duration,
+        })
+        window.setTimeout(() => {
+          suppressClickRef.current = false
+        }, 0)
+      }
+
+      dragStateRef.current = null
+      setDragPreview(null)
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerUp)
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+    }
+  }, [days, dragPreview, onBlockClick, onBlockManipulate])
+
+  function handleBlockPointerStart(
+    block: CalendarBlock,
+    mode: 'move' | 'resize',
+    event: ReactPointerEvent<HTMLDivElement | HTMLButtonElement>,
+  ) {
+    event.preventDefault()
+    event.stopPropagation()
+    dragStateRef.current = {
+      block,
+      mode,
+      startX: event.clientX,
+      startY: event.clientY,
+      originDate: block.date,
+      originStartMinutes: timeToMinutes(block.startTime),
+      originDuration: block.duration,
+      moved: false,
+    }
+    setDragPreview({
+      blockId: block.id,
+      date: block.date,
+      startTime: block.startTime,
+      duration: block.duration,
+    })
+  }
 
   return (
     <div className="flex flex-1 min-h-0 min-w-0">
@@ -777,8 +1083,11 @@ function TimeGrid({
       {/* Day columns */}
       <div ref={gridRef} className="flex flex-1 min-w-0 overflow-x-auto overflow-y-auto">
         {days.map((dateStr) => {
-          const isToday = dateStr === td
-          const dayBlocks = blocks.filter((b) => b.date === dateStr)
+      const isToday = dateStr === td
+          const dayBlocks = blocks.filter((b) => b.date === dateStr && dragPreview?.blockId !== b.id)
+          const previewBlock = dragPreview && dragPreview.date === dateStr
+            ? blocks.find((block) => block.id === dragPreview.blockId)
+            : null
 
           return (
             <div
@@ -833,10 +1142,32 @@ function TimeGrid({
                       key={block.id}
                       block={block}
                       selected={selectedId === block.id}
+                      related={relatedBlockIds.has(block.id)}
                       hasConflict={conflictIds?.has(block.id) ?? false}
-                      onClick={() => onBlockClick(block.id)}
+                      onPointerStart={handleBlockPointerStart}
+                      onSelect={() => {
+                        if (suppressClickRef.current) return
+                        onBlockClick(block.id)
+                      }}
                     />
                   ))}
+                  {previewBlock && dragPreview && (
+                    <BlockChip
+                      key={`drag-preview-${previewBlock.id}`}
+                      block={previewBlock}
+                      selected={selectedId === previewBlock.id}
+                      related={relatedBlockIds.has(previewBlock.id)}
+                      hasConflict={conflictIds?.has(previewBlock.id) ?? false}
+                      previewDate={dragPreview.date}
+                      previewStartTime={dragPreview.startTime}
+                      previewDuration={dragPreview.duration}
+                      onPointerStart={handleBlockPointerStart}
+                      onSelect={() => {
+                        if (suppressClickRef.current) return
+                        onBlockClick(previewBlock.id)
+                      }}
+                    />
+                  )}
                 </AnimatePresence>
               </div>
             </div>
@@ -853,11 +1184,13 @@ function AgendaView({
   blocks,
   tasks,
   selectedId,
+  relatedBlockIds,
   onBlockClick,
 }: {
   blocks: CalendarBlock[]
   tasks: Task[]
   selectedId: string | null
+  relatedBlockIds: Set<string>
   onBlockClick: (id: string) => void
 }) {
   const td = today()
@@ -915,8 +1248,8 @@ function AgendaView({
                     onClick={() => onBlockClick(block.id)}
                     className="flex items-center gap-3 rounded-md px-3 py-2 cursor-pointer group"
                     style={{
-                      background: selectedId === block.id ? `${color}10` : 'rgba(255,255,255,0.025)',
-                      border: selectedId === block.id ? `1px solid ${color}55` : '1px solid rgba(0,212,255,0.07)',
+                      background: selectedId === block.id ? `${color}10` : relatedBlockIds.has(block.id) ? `${color}08` : 'rgba(255,255,255,0.025)',
+                      border: selectedId === block.id ? `1px solid ${color}55` : relatedBlockIds.has(block.id) ? `1px solid ${color}33` : '1px solid rgba(0,212,255,0.07)',
                     }}
                   >
                     <div className="flex-shrink-0 w-1 self-stretch rounded-full" style={{ background: color }} />
@@ -958,14 +1291,23 @@ function AgendaView({
 export function NewCalendarTab() {
   const blocks = usePlannerStore((s) => s.blocks)
   const tasks = usePlannerStore((s) => s.tasks)
+  const protectedWindows = usePlannerStore((s) => s.protectedWindows)
   const addBlock = usePlannerStore((s) => s.addBlock)
   const updateBlock = usePlannerStore((s) => s.updateBlock)
   const deleteBlock = usePlannerStore((s) => s.deleteBlock)
+  const updateTask = usePlannerStore((s) => s.updateTask)
   const scheduleTask = usePlannerStore((s) => s.scheduleTask)
   const unscheduleTask = usePlannerStore((s) => s.unscheduleTask)
+  const addProtectedWindow = usePlannerStore((s) => s.addProtectedWindow)
+  const removeProtectedWindow = usePlannerStore((s) => s.removeProtectedWindow)
   const toggleLock = usePlannerStore((s) => s.toggleLock)
   const toggleFlexible = usePlannerStore((s) => s.toggleFlexible)
   const applyRebuiltBlocks = usePlannerStore((s) => s.applyRebuiltBlocks)
+  const applyPlanningActions = usePlannerStore((s) => s.applyPlanningActions)
+  const undoLastPlanningExecution = usePlannerStore((s) => s.undoLastPlanningExecution)
+  const dismissPlanningHistoryEntry = usePlannerStore((s) => s.dismissPlanningHistoryEntry)
+  const executionHistory = usePlannerStore((s) => s.executionHistory)
+  const undoSnapshot = usePlannerStore((s) => s.undoSnapshot)
 
   const td = today()
   const [calView, setCalView] = useState<CalView>('week')
@@ -974,6 +1316,12 @@ export function NewCalendarTab() {
   const [showAddModal, setShowAddModal] = useState(false)
   const [scheduleTaskId, setScheduleTaskId] = useState<string | null>(null)
   const [showInsights, setShowInsights] = useState(true)
+
+  // ── Optimize state ────────────────────────────────────────────────────────────
+  const [optimizing, setOptimizing] = useState(false)
+  const [optimizeResult, setOptimizeResult] = useState<OptimizeDayResult | OptimizeWeekResult | null>(null)
+  const [optimizeType, setOptimizeType] = useState<'day' | 'week' | null>(null)
+  const [showHistory, setShowHistory] = useState(false)
 
   // ── Navigation ───────────────────────────────────────────────────────────────
   function goToday() { setViewDate(td) }
@@ -1011,6 +1359,24 @@ export function NewCalendarTab() {
   const linkedTask = selectedBlock?.linkedTaskId
     ? tasks.find((t) => t.id === selectedBlock.linkedTaskId)
     : undefined
+  const selectedProtectedWindow = selectedBlock?.protectedWindowId
+    ? protectedWindows.find((window) => window.id === selectedBlock.protectedWindowId)
+    : undefined
+  const relatedBlockIds = useMemo(() => {
+    if (!selectedBlock) return new Set<string>()
+    if (selectedBlock.linkedTaskId) {
+      const task = tasks.find((entry) => entry.id === selectedBlock.linkedTaskId)
+      return new Set(task?.linkedCalendarBlockIds ?? [])
+    }
+    if (selectedBlock.protectedWindowId) {
+      return new Set(
+        blocks
+          .filter((block) => block.protectedWindowId === selectedBlock.protectedWindowId)
+          .map((block) => block.id),
+      )
+    }
+    return new Set<string>()
+  }, [blocks, selectedBlock, tasks])
 
   const scheduleTaskData = scheduleTaskId ? tasks.find((t) => t.id === scheduleTaskId) ?? null : null
 
@@ -1022,12 +1388,37 @@ export function NewCalendarTab() {
     return ids
   }, [conflicts])
 
-  // ── Planner signals ───────────────────────────────────────────────────────────
+  // ── Planner signals + weekly AI commentary ───────────────────────────────────
   const [showInsightsState, setShowInsightsState] = useState(true)
+  const [aiCommentary, setAiCommentary] = useState<WeeklyCommentaryResult | null>(null)
+  const commentaryLoadedRef = useRef(false)
+
+  useEffect(() => {
+    if (!showInsightsState || commentaryLoadedRef.current) return
+    commentaryLoadedRef.current = true
+    const summary = generatePlannerSummary(tasks, blocks)
+    buildWeeklyCommentaryAI(summary).then(setAiCommentary)
+  }, [showInsightsState]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const plannerSignals = useMemo<PlannerSignal[]>(() => {
     if (!showInsightsState) return []
-    return summaryToSignals(generatePlannerSummary(tasks, blocks))
-  }, [tasks, blocks, showInsightsState])
+    const signals = summaryToSignals(generatePlannerSummary(tasks, blocks))
+    if (aiCommentary) {
+      signals.unshift({
+        id: 'ai-weekly-commentary',
+        type: 'suggestion',
+        message: aiCommentary.summaryText,
+        severity: 'info',
+      })
+    }
+    return signals
+  }, [tasks, blocks, showInsightsState, aiCommentary])
+
+  const protectedWindowsForViewDate = useMemo(
+    () => protectedWindows.filter((window) => window.date === viewDate),
+    [protectedWindows, viewDate],
+  )
+  const nextPremiumWindow = useMemo(() => getNextPremiumFreeWindow(viewDate, blocks), [blocks, viewDate])
 
   // ── Rebuild day ───────────────────────────────────────────────────────────────
   function handleRebuildDay(date: string) {
@@ -1037,10 +1428,41 @@ export function NewCalendarTab() {
     }
   }
 
+  // ── Optimize handlers ─────────────────────────────────────────────────────────
+  function handleOptimizeDay() {
+    const targetDate = calView === 'day' ? viewDate : td
+    setOptimizing(true)
+    setOptimizeResult(null)
+    setOptimizeType('day')
+    optimizeDayAI(targetDate, tasks, blocks)
+      .then(setOptimizeResult)
+      .finally(() => setOptimizing(false))
+  }
+
+  function handleOptimizeWeek() {
+    const ws = weekDays[0]
+    setOptimizing(true)
+    setOptimizeResult(null)
+    setOptimizeType('week')
+    optimizeWeekAI(ws, tasks, blocks)
+      .then(setOptimizeResult)
+      .finally(() => setOptimizing(false))
+  }
+
+  function handleDismissOptimize() {
+    setOptimizeResult(null)
+    setOptimizeType(null)
+    setShowHistory(false)
+  }
+
   function handleUnlink() {
     if (!selectedBlock) return
     if (selectedBlock.linkedTaskId) {
-      usePlannerStore.getState().updateTask(selectedBlock.linkedTaskId, { scheduled: false, linkedCalendarBlockId: undefined })
+      const task = tasks.find((entry) => entry.id === selectedBlock.linkedTaskId)
+      if (task) {
+        const synced = syncTaskWithBlocks(task, blocks.filter((block) => block.id !== selectedBlock.id))
+        usePlannerStore.getState().updateTask(selectedBlock.linkedTaskId, synced)
+      }
     }
     updateBlock(selectedBlock.id, { linkedTaskId: undefined })
   }
@@ -1048,10 +1470,44 @@ export function NewCalendarTab() {
   function handleDeleteBlock(id: string) {
     const b = blocks.find((bl) => bl.id === id)
     if (b?.linkedTaskId) {
-      usePlannerStore.getState().updateTask(b.linkedTaskId, { scheduled: false, linkedCalendarBlockId: undefined })
+      const task = tasks.find((entry) => entry.id === b.linkedTaskId)
+      if (task) {
+        const synced = syncTaskWithBlocks(task, blocks.filter((block) => block.id !== id))
+        usePlannerStore.getState().updateTask(b.linkedTaskId, synced)
+      }
+    }
+    if (b?.protectedWindowId) {
+      removeProtectedWindow(b.protectedWindowId)
+      if (selectedBlockId === id) setSelectedBlockId(null)
+      return
     }
     deleteBlock(id)
     if (selectedBlockId === id) setSelectedBlockId(null)
+  }
+
+  function handleProtectViewDate() {
+    if (!nextPremiumWindow) return
+    addProtectedWindow({
+      date: nextPremiumWindow.date,
+      startTime: nextPremiumWindow.startTime,
+      endTime: nextPremiumWindow.endTime,
+      durationMinutes: nextPremiumWindow.durationMinutes,
+      source: 'manual',
+      locked: true,
+      rationale: 'Manually protected premium focus window.',
+    })
+  }
+
+  function handleRemoveSelectedProtection() {
+    if (selectedProtectedWindow) {
+      removeProtectedWindow(selectedProtectedWindow.id)
+      setSelectedBlockId(null)
+    }
+  }
+
+  function handleManipulateBlock(id: string, patch: Partial<CalendarBlock>) {
+    updateBlock(id, patch)
+    setSelectedBlockId(id)
   }
 
   function handleScheduleTask(date: string, startTime: string) {
@@ -1091,6 +1547,14 @@ export function NewCalendarTab() {
         <div className="flex items-center gap-2 flex-1 justify-center">
           <CalendarDays className="w-3.5 h-3.5" style={{ color: '#00d4ff' }} />
           <h2 className="text-[11px] font-mono tracking-[0.2em]" style={{ color: 'rgba(0,212,255,0.9)' }}>CALENDAR</h2>
+          {protectedWindowsForViewDate.length > 0 && (
+            <span
+              className="text-[8px] font-mono px-1.5 py-0.5 rounded"
+              style={{ color: '#9d4edd', background: 'rgba(157,78,221,0.1)', border: '1px solid rgba(157,78,221,0.2)' }}
+            >
+              PROTECTED {protectedWindowsForViewDate.length}
+            </span>
+          )}
         </div>
 
         {/* View toggles + add */}
@@ -1113,6 +1577,57 @@ export function NewCalendarTab() {
               </button>
             ))}
           </div>
+
+          <button
+            onClick={handleOptimizeDay}
+            disabled={optimizing}
+            className="flex items-center gap-1.5 rounded-md px-3 py-1.5"
+            style={{
+              background: 'rgba(157,78,221,0.08)',
+              border: '1px solid rgba(157,78,221,0.2)',
+              color: '#9d4edd',
+              opacity: optimizing ? 0.6 : 1,
+            }}
+            title="Optimize today's schedule with AI"
+          >
+            {optimizing && optimizeType === 'day'
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <Brain className="w-3.5 h-3.5" />}
+            <span className="text-[9px] font-mono tracking-wider">OPTIMIZE DAY</span>
+          </button>
+
+          <button
+            onClick={handleOptimizeWeek}
+            disabled={optimizing}
+            className="flex items-center gap-1.5 rounded-md px-3 py-1.5"
+            style={{
+              background: 'rgba(157,78,221,0.05)',
+              border: '1px solid rgba(157,78,221,0.14)',
+              color: 'rgba(157,78,221,0.7)',
+              opacity: optimizing ? 0.6 : 1,
+            }}
+            title="Optimize this week's schedule"
+          >
+            {optimizing && optimizeType === 'week'
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <Wand2 className="w-3.5 h-3.5" />}
+            <span className="text-[9px] font-mono tracking-wider">OPTIMIZE WEEK</span>
+          </button>
+
+          <button
+            onClick={handleProtectViewDate}
+            disabled={!nextPremiumWindow}
+            className="flex items-center gap-1.5 rounded-md px-3 py-1.5"
+            style={{
+              background: nextPremiumWindow ? 'rgba(0,212,255,0.06)' : 'rgba(255,255,255,0.03)',
+              border: `1px solid ${nextPremiumWindow ? 'rgba(0,212,255,0.18)' : 'rgba(255,255,255,0.08)'}`,
+              color: nextPremiumWindow ? '#00d4ff' : 'rgba(192,232,240,0.3)',
+            }}
+            title={nextPremiumWindow ? `Protect ${nextPremiumWindow.startTime}-${nextPremiumWindow.endTime}` : 'No premium free window available'}
+          >
+            <Shield className="w-3.5 h-3.5" />
+            <span className="text-[9px] font-mono tracking-wider">PROTECT WINDOW</span>
+          </button>
 
           <button
             onClick={() => setShowAddModal(true)}
@@ -1171,6 +1686,122 @@ export function NewCalendarTab() {
               <button onClick={() => setShowInsightsState(false)} style={{ color: 'rgba(192,232,240,0.25)', flexShrink: 0 }}>
                 <X className="w-3 h-3" />
               </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Optimize preview panel ── */}
+      <AnimatePresence>
+        {(optimizing || optimizeResult || (undoSnapshot !== null) || executionHistory.length > 0) && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            className="overflow-hidden flex-shrink-0"
+          >
+            <div
+              style={{
+                borderBottom: '1px solid rgba(157,78,221,0.15)',
+                background: 'rgba(157,78,221,0.035)',
+                borderLeft: '3px solid rgba(157,78,221,0.4)',
+              }}
+            >
+              {/* ── Loading state ── */}
+              {optimizing && (
+                <div className="flex items-center gap-2 px-4 py-2.5">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0" style={{ color: '#9d4edd' }} />
+                  <span className="text-[9px] font-mono tracking-wider" style={{ color: '#9d4edd' }}>
+                    AI REASONING{optimizeType === 'week' ? ' ACROSS WEEK' : ' FOR TODAY'}…
+                  </span>
+                </div>
+              )}
+
+              {/* ── Result panel ── */}
+              {!optimizing && optimizeResult && optimizeType && (
+                <OptimizePreviewPanel
+                  result={optimizeResult}
+                  optimizeType={optimizeType}
+                  onDismiss={handleDismissOptimize}
+                />
+              )}
+
+              {/* ── Execution history footer ── */}
+              {executionHistory.length > 0 && (
+                <div
+                  className="px-4 py-2"
+                  style={{ borderTop: '1px solid rgba(157,78,221,0.1)' }}
+                >
+                  <button
+                    onClick={() => setShowHistory((v) => !v)}
+                    className="flex items-center gap-1.5 w-full text-left"
+                  >
+                    <Clock className="w-2.5 h-2.5 flex-shrink-0" style={{ color: 'rgba(157,78,221,0.5)' }} />
+                    <span className="text-[8px] font-mono tracking-wider flex-1" style={{ color: 'rgba(157,78,221,0.5)' }}>
+                      EXECUTION HISTORY ({executionHistory.length})
+                    </span>
+                    <ChevronRight
+                      className="w-2.5 h-2.5 flex-shrink-0 transition-transform"
+                      style={{
+                        color: 'rgba(157,78,221,0.4)',
+                        transform: showHistory ? 'rotate(90deg)' : 'none',
+                      }}
+                    />
+                  </button>
+
+                  {showHistory && (
+                    <div className="mt-1.5 space-y-1 max-h-32 overflow-y-auto">
+                      {executionHistory.map((entry: ExecutionHistoryEntry) => (
+                        <div
+                          key={entry.id}
+                          className="flex items-center gap-2 px-2 py-1 rounded"
+                          style={{ background: 'rgba(157,78,221,0.04)', border: '1px solid rgba(157,78,221,0.1)' }}
+                        >
+                          <span className="text-[7px] font-mono flex-1 truncate" style={{ color: 'rgba(192,232,240,0.5)' }}>
+                            {new Date(entry.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
+                            {' · '}{entry.source.replace('_', ' ').toUpperCase()}
+                            {' · '}{entry.actionCount} action{entry.actionCount !== 1 ? 's' : ''}
+                            {entry.plannerSource ? ` · ${entry.plannerSource.toUpperCase()}` : ''}
+                          </span>
+                          {entry.undoAvailable && undoSnapshot && (
+                            <button
+                              onClick={undoLastPlanningExecution}
+                              className="flex-shrink-0 text-[7px] font-mono px-1 py-0.5 rounded"
+                              style={{ color: '#ffc84a', background: 'rgba(255,196,74,0.08)', border: '1px solid rgba(255,196,74,0.15)' }}
+                            >
+                              UNDO
+                            </button>
+                          )}
+                          <button
+                            onClick={() => dismissPlanningHistoryEntry(entry.id)}
+                            style={{ color: 'rgba(192,232,240,0.2)', flexShrink: 0 }}
+                          >
+                            <X className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── Undo available indicator (when no result panel shown) ── */}
+              {!optimizing && !optimizeResult && undoSnapshot && (
+                <div className="flex items-center gap-2 px-4 py-2">
+                  <RefreshCw className="w-2.5 h-2.5 flex-shrink-0" style={{ color: '#ffc84a' }} />
+                  <span className="text-[8px] font-mono flex-1" style={{ color: '#ffc84a' }}>
+                    Optimizer changes can be undone
+                  </span>
+                  <button
+                    onClick={undoLastPlanningExecution}
+                    className="flex-shrink-0 px-2 py-0.5 rounded text-[7px] font-mono tracking-wider"
+                    style={{ background: 'rgba(255,196,74,0.1)', border: '1px solid rgba(255,196,74,0.2)', color: '#ffc84a' }}
+                  >
+                    UNDO LAST
+                  </button>
+                </div>
+              )}
             </div>
           </motion.div>
         )}
@@ -1241,9 +1872,11 @@ export function NewCalendarTab() {
               days={days}
               blocks={blocks}
               selectedId={selectedBlockId}
+              relatedBlockIds={relatedBlockIds}
               currentTimeDate={td}
               conflictIds={conflictBlockIds}
               onBlockClick={(id) => setSelectedBlockId(selectedBlockId === id ? null : id)}
+              onBlockManipulate={handleManipulateBlock}
             />
           </div>
         ) : (
@@ -1252,6 +1885,7 @@ export function NewCalendarTab() {
               blocks={blocks}
               tasks={tasks}
               selectedId={selectedBlockId}
+              relatedBlockIds={relatedBlockIds}
               onBlockClick={(id) => setSelectedBlockId(selectedBlockId === id ? null : id)}
             />
           </div>
@@ -1263,9 +1897,11 @@ export function NewCalendarTab() {
             <BlockInspector
               block={selectedBlock}
               linkedTask={linkedTask}
+              protectedWindow={selectedProtectedWindow}
               onClose={() => setSelectedBlockId(null)}
               onDelete={() => handleDeleteBlock(selectedBlock.id)}
               onUnlink={handleUnlink}
+              onRemoveProtection={handleRemoveSelectedProtection}
               onUpdate={(patch) => updateBlock(selectedBlock.id, patch)}
             />
           )}
@@ -1286,7 +1922,7 @@ export function NewCalendarTab() {
       <AnimatePresence>
         {scheduleTaskData && (
           <ScheduleModal
-            taskTitle={scheduleTaskData.title}
+            task={scheduleTaskData}
             onClose={() => setScheduleTaskId(null)}
             onSchedule={handleScheduleTask}
           />

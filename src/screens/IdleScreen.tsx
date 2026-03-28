@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 import { ReactorOrb } from '@/components/hud/ReactorOrb'
+import { playActivationRamp, resumeAudio } from '@/lib/audio'
+import { useJarvisStore } from '@/store/jarvis'
 import { useUIState } from '@/store/uiState'
 
 function makeParticles(count: number) {
@@ -17,8 +19,15 @@ function makeParticles(count: number) {
 export function IdleScreen() {
   const mode = useUIState((s) => s.mode)
   const setMode = useUIState((s) => s.setMode)
+  const config = useJarvisStore((s) => s.config)
   const particles = useMemo(() => makeParticles(12), [])
   const isActivating = mode === 'activating'
+
+  useEffect(() => {
+    if (!isActivating || !config.theme.soundEnabled) return
+    const stop = playActivationRamp()
+    return () => stop()
+  }, [config.theme.soundEnabled, isActivating])
 
   return (
     <motion.div
@@ -73,7 +82,11 @@ export function IdleScreen() {
       {/* Centered orb */}
       <div
         className="relative cursor-pointer"
-        onClick={() => { if (!isActivating) setMode('activating') }}
+        onClick={() => {
+          if (isActivating) return
+          resumeAudio()
+          setMode('activating')
+        }}
       >
         <ReactorOrb size={260} activating={isActivating} />
       </div>

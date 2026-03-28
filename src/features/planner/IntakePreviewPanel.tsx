@@ -94,13 +94,7 @@ export function IntakePreviewPanel({
 
       if (plannerResponse.result) {
         setPlannerPreview(plannerResponse)
-        setActivePlanSession({
-          result:                plannerResponse.result,
-          command:               plannerResponse.command,
-          timestamp:             new Date().toISOString(),
-          refinementConstraints: {},
-          refinementHistory:     [],
-        })
+        setActivePlanSession(null)
         addMessage({
           id:        nanoid(),
           role:      'assistant',
@@ -211,7 +205,7 @@ export function IntakePreviewPanel({
       {/* Post-apply: event-only confirmation */}
       {applied && onlyEvents && (
         <p className="text-[8px] font-mono" style={{ color: 'rgba(0,255,136,0.65)' }}>
-          ✓ Added to your calendar. You're all set.
+          ✓ Added to the planner calendar. You're all set.
         </p>
       )}
 

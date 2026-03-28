@@ -3,12 +3,14 @@
  *
  * All sounds synthesized via WebAudio — zero external assets.
  *   - Boot: sine sweep 200→1200→800Hz + triangle harmonic overtone + C6 chime, 2.2s
+ *   - Activation: engine-like reactor spool-up with filtered air rush, 4.1s
  *   - Engage: rising sine 660→880Hz with subtle sub-octave, 220ms
  *   - Complete: descending two-note chime, 500ms
  *   - Error: sawtooth siren 440→220Hz + low thud, 350ms
  */
 
 let ctx: AudioContext | null = null
+let noiseBuffer: AudioBuffer | null = null
 
 function getCtx(): AudioContext {
   if (!ctx) ctx = new AudioContext()
@@ -17,6 +19,18 @@ function getCtx(): AudioContext {
 
 export function getAudioContext(): AudioContext {
   return getCtx()
+}
+
+function getNoiseBuffer(c: AudioContext): AudioBuffer {
+  if (noiseBuffer && noiseBuffer.sampleRate === c.sampleRate) return noiseBuffer
+
+  const buffer = c.createBuffer(1, c.sampleRate * 2, c.sampleRate)
+  const channel = buffer.getChannelData(0)
+  for (let i = 0; i < channel.length; i++) {
+    channel[i] = Math.random() * 2 - 1
+  }
+  noiseBuffer = buffer
+  return buffer
 }
 
 /** AI awakening — full boot chime with harmonic overtone, ~2.2s */
@@ -73,6 +87,138 @@ export function playBootChime(volume = 1): void {
     gain3.gain.linearRampToValueAtTime(0, now + 1.6)
     osc3.start(now); osc3.stop(now + 1.65)
   } catch { /* AudioContext unavailable */ }
+}
+
+/** Activation spool-up — engine-like acceleration with turbine hiss, ~4.1s. */
+export function playActivationRamp(volume = 1): () => void {
+  try {
+    const c = getCtx()
+    const now = c.currentTime
+    const duration = 4.1
+    const end = now + duration
+    const base = 0.075 * volume
+
+    const master = c.createGain()
+    const drive = c.createWaveShaper()
+    const curve = new Float32Array(256)
+    for (let i = 0; i < curve.length; i++) {
+      const x = (i / (curve.length - 1)) * 2 - 1
+      curve[i] = Math.tanh(x * 2.8)
+    }
+    drive.curve = curve
+    drive.oversample = '4x'
+
+    master.connect(drive)
+    drive.connect(c.destination)
+    master.gain.setValueAtTime(0.0001, now)
+    master.gain.exponentialRampToValueAtTime(base * 1.6, now + 0.22)
+    master.gain.linearRampToValueAtTime(base * 2.35, now + 2.6)
+    master.gain.linearRampToValueAtTime(base * 1.85, end)
+    master.gain.exponentialRampToValueAtTime(0.0001, end + 0.08)
+
+    const lowOsc = c.createOscillator()
+    const lowGain = c.createGain()
+    lowOsc.type = 'sawtooth'
+    lowOsc.frequency.setValueAtTime(38, now)
+    lowOsc.frequency.exponentialRampToValueAtTime(132, end)
+    lowGain.gain.setValueAtTime(base * 1.05, now)
+    lowGain.gain.linearRampToValueAtTime(base * 1.45, now + 2.5)
+    lowGain.gain.linearRampToValueAtTime(base * 1.12, end)
+    lowOsc.connect(lowGain)
+    lowGain.connect(master)
+
+    const bodyOsc = c.createOscillator()
+    const bodyGain = c.createGain()
+    bodyOsc.type = 'sawtooth'
+    bodyOsc.frequency.setValueAtTime(76, now)
+    bodyOsc.frequency.exponentialRampToValueAtTime(360, end)
+    bodyGain.gain.setValueAtTime(base * 0.44, now)
+    bodyGain.gain.linearRampToValueAtTime(base * 0.78, end)
+    bodyOsc.connect(bodyGain)
+    bodyGain.connect(master)
+
+    const gritOsc = c.createOscillator()
+    const gritGain = c.createGain()
+    gritOsc.type = 'square'
+    gritOsc.frequency.setValueAtTime(120, now)
+    gritOsc.frequency.exponentialRampToValueAtTime(420, end)
+    gritGain.gain.setValueAtTime(base * 0.08, now)
+    gritGain.gain.linearRampToValueAtTime(base * 0.2, end)
+    gritOsc.connect(gritGain)
+    gritGain.connect(master)
+
+    const whineOsc = c.createOscillator()
+    const whineGain = c.createGain()
+    whineOsc.type = 'sine'
+    whineOsc.frequency.setValueAtTime(220, now)
+    whineOsc.frequency.exponentialRampToValueAtTime(1400, end)
+    whineGain.gain.setValueAtTime(0.0001, now)
+    whineGain.gain.exponentialRampToValueAtTime(base * 0.16, now + 0.35)
+    whineGain.gain.linearRampToValueAtTime(base * 0.62, end)
+    whineOsc.connect(whineGain)
+    whineGain.connect(master)
+
+    const wobble = c.createOscillator()
+    const wobbleGain = c.createGain()
+    wobble.type = 'sine'
+    wobble.frequency.setValueAtTime(9, now)
+    wobble.frequency.linearRampToValueAtTime(24, end)
+    wobbleGain.gain.setValueAtTime(7, now)
+    wobbleGain.gain.linearRampToValueAtTime(18, end)
+    wobble.connect(wobbleGain)
+    wobbleGain.connect(lowOsc.detune)
+
+    const flutter = c.createOscillator()
+    const flutterGain = c.createGain()
+    flutter.type = 'triangle'
+    flutter.frequency.setValueAtTime(12, now)
+    flutter.frequency.linearRampToValueAtTime(36, end)
+    flutterGain.gain.setValueAtTime(5, now)
+    flutterGain.gain.linearRampToValueAtTime(14, end)
+    flutter.connect(flutterGain)
+    flutterGain.connect(whineOsc.detune)
+
+    const noise = c.createBufferSource()
+    const noiseFilter = c.createBiquadFilter()
+    const noiseHighpass = c.createBiquadFilter()
+    const noiseGain = c.createGain()
+    noise.buffer = getNoiseBuffer(c)
+    noise.loop = true
+    noiseFilter.type = 'bandpass'
+    noiseFilter.frequency.setValueAtTime(300, now)
+    noiseFilter.frequency.exponentialRampToValueAtTime(3200, end)
+    noiseFilter.Q.setValueAtTime(1.2, now)
+    noiseFilter.Q.linearRampToValueAtTime(5.5, end)
+    noiseHighpass.type = 'highpass'
+    noiseHighpass.frequency.setValueAtTime(120, now)
+    noiseHighpass.frequency.linearRampToValueAtTime(620, end)
+    noiseGain.gain.setValueAtTime(0.0001, now)
+    noiseGain.gain.exponentialRampToValueAtTime(base * 0.16, now + 0.35)
+    noiseGain.gain.linearRampToValueAtTime(base * 0.62, end)
+    noise.connect(noiseFilter)
+    noiseFilter.connect(noiseHighpass)
+    noiseHighpass.connect(noiseGain)
+    noiseGain.connect(master)
+
+    const nodes = [lowOsc, bodyOsc, gritOsc, whineOsc, wobble, flutter, noise] as const
+    nodes.forEach((node) => node.start(now))
+    nodes.forEach((node) => node.stop(end + 0.12))
+
+    let stopped = false
+    return () => {
+      if (stopped) return
+      stopped = true
+      const stopAt = c.currentTime
+      master.gain.cancelScheduledValues(stopAt)
+      master.gain.setValueAtTime(Math.max(master.gain.value, 0.0001), stopAt)
+      master.gain.exponentialRampToValueAtTime(0.0001, stopAt + 0.08)
+      nodes.forEach((node) => {
+        try { node.stop(stopAt + 0.1) } catch { /* already stopped */ }
+      })
+    }
+  } catch {
+    return () => {}
+  }
 }
 
 /** Send/engage tone — rising sine with subtle sub-octave, 220ms. */

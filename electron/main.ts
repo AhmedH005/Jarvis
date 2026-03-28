@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import { join } from 'path'
 import { readFile } from 'fs/promises'
 import { readFileSync } from 'fs'
+import crypto from 'node:crypto'
 
 // Load .env from project root (no dotenv dependency needed).
 // Runs synchronously at module load so process.env is populated before any handler fires.
@@ -21,6 +22,15 @@ console.log('[Main] ANTHROPIC_API_KEY loaded:', !!process.env['ANTHROPIC_API_KEY
 console.log('[Main] ELEVENLABS_API_KEY loaded:', !!process.env['ELEVENLABS_API_KEY'])
 import { OpenClawBridge } from './openclaw'
 import type { StreamEvent } from './openclaw'
+import { TelegramBridge } from './telegram'
+import { initPhoneBridge } from './phone'
+import { registerGmailIpcHandlers } from './gmail'
+import {
+  JARVIS_PLANNER_BRIDGE_OFFLINE_MESSAGE,
+  type PlannerApplyPlanningActionsPayload,
+  type PlannerBridgeResult,
+  type PlannerCreateManyFromIntakePayload,
+} from '../src/shared/planner-bridge'
 import {
   handleBuilderCreateExecutionRequest,
   handleBuilderCreateRemediationRequest,
@@ -34,6 +44,7 @@ import {
 
 let mainWindow: BrowserWindow | null = null
 let bridge: OpenClawBridge | null = null
+let telegramBridge: TelegramBridge | null = null
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -80,7 +91,21 @@ app.whenReady().then(() => {
   })
 
   registerIpcHandlers(bridge)
+  registerGmailIpcHandlers()
   createWindow()
+
+  // Phone bridge — init after createWindow so mainWindow is set
+  if (mainWindow) void initPhoneBridge(mainWindow)
+
+  const telegramToken = process.env['TELEGRAM_BOT_TOKEN']?.trim()
+  if (telegramToken) {
+    telegramBridge = new TelegramBridge(telegramToken, process.env['TELEGRAM_ALLOWED_CHAT_ID'])
+    telegramBridge.setMessageHandler((message) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      mainWindow.webContents.send('telegram:message', message)
+    })
+    telegramBridge.start()
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -88,8 +113,45 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
+  telegramBridge?.stop()
   if (process.platform !== 'darwin') app.quit()
 })
+
+// ── Planner bridge ─────────────────────────────────────────────────────────────
+// Pending calls: correlationId → resolve callback.
+// Main sends 'planner:bridge:command' to renderer; renderer resolves via
+// 'planner:bridge:result'.
+
+const pendingPlannerCalls = new Map<string, (result: PlannerBridgeResult) => void>()
+
+/**
+ * Send a planner command to the renderer and await its result.
+ * Used by both IPC handlers (renderer-initiated calls that round-trip through
+ * main for validation) and any future main-process callers (e.g. OpenClaw tools).
+ */
+async function plannerBridgeCall(method: string, data: unknown): Promise<PlannerBridgeResult> {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    console.warn(`[planner-bridge][main] plannerBridgeCall(${method}) — mainWindow unavailable`)
+    return { success: false, error: JARVIS_PLANNER_BRIDGE_OFFLINE_MESSAGE }
+  }
+  const id = crypto.randomUUID()
+  const wcId = mainWindow.webContents.id
+  console.log(`[planner-bridge][main] → send command method=${method} id=${id} webContentsId=${wcId}`)
+  return new Promise<PlannerBridgeResult>((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingPlannerCalls.delete(id)
+      console.warn(`[planner-bridge][main] ✗ timeout method=${method} id=${id} — renderer never replied`)
+      resolve({ success: false, error: JARVIS_PLANNER_BRIDGE_OFFLINE_MESSAGE })
+    }, 8000)
+    pendingPlannerCalls.set(id, (result) => {
+      clearTimeout(timeout)
+      pendingPlannerCalls.delete(id)
+      console.log(`[planner-bridge][main] ✓ result received method=${method} id=${id} success=${result.success}`)
+      resolve(result)
+    })
+    mainWindow!.webContents.send('planner:bridge:command', { id, method, data })
+  })
+}
 
 // ── IPC handlers ───────────────────────────────────────────────────────────────
 
@@ -132,6 +194,13 @@ function registerIpcHandlers(b: OpenClawBridge): void {
 
   // OpenClaw: skills list
   ipcMain.handle('openclaw:skills', async () => b.getSkills())
+
+  // Telegram: outbound reply
+  ipcMain.handle('telegram:reply', async (_event, payload: { chatId: string; text: string }) => {
+    if (!telegramBridge) return { ok: false, error: 'Telegram bridge not configured' }
+    await telegramBridge.sendMessage(payload.chatId, payload.text)
+    return { ok: true }
+  })
 
   // Shell: safe external URL open
   ipcMain.handle('shell:open', (_event, url: string) => shell.openExternal(url))
@@ -182,6 +251,95 @@ function registerIpcHandlers(b: OpenClawBridge): void {
   ipcMain.handle('checker:verifyRun', async (_event, payload) =>
     handleCheckerVerifyRun(payload)
   )
+
+  // ── Planner bridge ─────────────────────────────────────────────────────────
+  // Renderer sends back the result of a bridge command.
+  ipcMain.on('planner:bridge:result', (event, { id, result }: { id: string; result: PlannerBridgeResult }) => {
+    console.log(`[planner-bridge][main] ← bridge result from webContentsId=${event.sender.id} id=${id} success=${result?.success}`)
+    const resolve = pendingPlannerCalls.get(id)
+    if (resolve) {
+      resolve(result)
+    } else {
+      console.warn(`[planner-bridge][main] ← bridge result id=${id} had no pending call (already timed out?)`)
+    }
+  })
+
+  ipcMain.handle('planner:ping', async (event): Promise<PlannerBridgeResult> => {
+    console.log(`[planner-bridge][main] IPC planner:ping from webContentsId=${event.sender.id}`)
+    return plannerBridgeCall('ping', null)
+  })
+
+  // Create a calendar event block in the planner store.
+  ipcMain.handle('planner:createEvent', async (event, data: unknown): Promise<PlannerBridgeResult> => {
+    console.log(`[planner-bridge][main] IPC planner:createEvent from webContentsId=${event.sender.id}`, data)
+    const d = data as Record<string, unknown> | null
+    if (!d || typeof d['title'] !== 'string' || typeof d['date'] !== 'string' || typeof d['startTime'] !== 'string') {
+      console.warn('[planner-bridge][main] planner:createEvent validation failed', d)
+      return { success: false, error: 'Invalid input: title, date, and startTime are required' }
+    }
+    return plannerBridgeCall('createEvent', d)
+  })
+
+  // Create a task in the planner store.
+  ipcMain.handle('planner:createTask', async (event, data: unknown): Promise<PlannerBridgeResult> => {
+    console.log(`[planner-bridge][main] IPC planner:createTask from webContentsId=${event.sender.id}`, data)
+    const d = data as Record<string, unknown> | null
+    if (!d || typeof d['title'] !== 'string') {
+      console.warn('[planner-bridge][main] planner:createTask validation failed', d)
+      return { success: false, error: 'Invalid input: title is required' }
+    }
+    return plannerBridgeCall('createTask', d)
+  })
+
+  // Atomically create intake-derived events/tasks.
+  ipcMain.handle('planner:createManyFromIntake', async (event, data: unknown): Promise<PlannerBridgeResult> => {
+    console.log(`[planner-bridge][main] IPC planner:createManyFromIntake from webContentsId=${event.sender.id}`, data)
+    const d = data as PlannerCreateManyFromIntakePayload | null
+    if (!d || !Array.isArray(d.events) || !Array.isArray(d.tasks)) {
+      console.warn('[planner-bridge][main] planner:createManyFromIntake validation failed', d)
+      return { success: false, error: 'Invalid input: events[] and tasks[] are required' }
+    }
+    return plannerBridgeCall('createManyFromIntake', d)
+  })
+
+  // List all calendar blocks in the planner store.
+  ipcMain.handle('planner:listEvents', async (event): Promise<PlannerBridgeResult> => {
+    console.log(`[planner-bridge][main] IPC planner:listEvents from webContentsId=${event.sender.id}`)
+    return plannerBridgeCall('listEvents', null)
+  })
+
+  // Patch an existing calendar block.
+  ipcMain.handle('planner:updateEvent', async (event, data: unknown): Promise<PlannerBridgeResult> => {
+    console.log(`[planner-bridge][main] IPC planner:updateEvent from webContentsId=${event.sender.id}`, data)
+    const d = data as Record<string, unknown> | null
+    if (!d || typeof d['id'] !== 'string') {
+      console.warn('[planner-bridge][main] planner:updateEvent validation failed — missing id')
+      return { success: false, error: 'Invalid input: id is required' }
+    }
+    return plannerBridgeCall('updateEvent', d)
+  })
+
+  // Delete a calendar block by id.
+  ipcMain.handle('planner:deleteEvent', async (event, data: unknown): Promise<PlannerBridgeResult> => {
+    console.log(`[planner-bridge][main] IPC planner:deleteEvent from webContentsId=${event.sender.id}`, data)
+    const d = data as Record<string, unknown> | null
+    if (!d || typeof d['id'] !== 'string') {
+      console.warn('[planner-bridge][main] planner:deleteEvent validation failed — missing id')
+      return { success: false, error: 'Invalid input: id is required' }
+    }
+    return plannerBridgeCall('deleteEvent', d)
+  })
+
+  // Apply a planner optimization/refinement result against the live store.
+  ipcMain.handle('planner:applyPlanningActions', async (event, data: unknown): Promise<PlannerBridgeResult> => {
+    console.log(`[planner-bridge][main] IPC planner:applyPlanningActions from webContentsId=${event.sender.id}`)
+    const d = data as PlannerApplyPlanningActionsPayload | null
+    if (!d || !Array.isArray(d.actions) || !d.options || typeof d.options.summary !== 'string') {
+      console.warn('[planner-bridge][main] planner:applyPlanningActions validation failed', d)
+      return { success: false, error: 'Invalid input: actions and options.summary are required' }
+    }
+    return plannerBridgeCall('applyPlanningActions', d)
+  })
 
   // ── LLM: stream a response from Claude (Anthropic API) ─────────────────────
   ipcMain.handle(
@@ -258,6 +416,40 @@ function registerIpcHandlers(b: OpenClawBridge): void {
       }
     }
   )
+
+  // ── Music generation: ElevenLabs Sound Generation ────────────────────────────
+  ipcMain.handle('music:generate', async (_event, { prompt }: { prompt: string }) => {
+    const apiKey = process.env['ELEVENLABS_API_KEY']
+    if (!apiKey) {
+      console.warn('[Music] ELEVENLABS_API_KEY not set — music generation unavailable')
+      return { ok: false, error: 'ELEVENLABS_API_KEY not set' }
+    }
+    try {
+      const res = await fetch('https://api.elevenlabs.io/v1/sound-generation', {
+        method: 'POST',
+        headers: {
+          'xi-api-key': apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: prompt,
+          duration_seconds: 22,
+          prompt_influence: 0.3,
+        }),
+      })
+      if (!res.ok) {
+        const errorText = await res.text()
+        console.error('[Music] ElevenLabs API error:', res.status, errorText)
+        return { ok: false, status: res.status, error: errorText }
+      }
+      const audio = Buffer.from(await res.arrayBuffer())
+      console.log('[Music] ElevenLabs audio generated', { bytes: audio.byteLength })
+      return { ok: true, mimeType: 'audio/mpeg', audioBase64: audio.toString('base64'), bytes: audio.byteLength }
+    } catch (err) {
+      console.error('[Music] ElevenLabs fetch error:', err)
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
 
   // ── TTS: generate speech via ElevenLabs ──────────────────────────────────────
   ipcMain.handle('tts:speak', async (_event, { text }: { text: string }) => {

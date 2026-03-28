@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
 import { uid, today, addDays } from '@/lib/dateUtils'
 import type { PlanningAction, OptimizeDayResult, OptimizeWeekResult } from '@/features/planner/planningTypes'
 import {
@@ -119,6 +120,14 @@ export { uid, today, addDays } from '@/lib/dateUtils'
 const t = today()
 
 const NOW = new Date().toISOString()
+
+function addMinsToTime(time: string, deltaMinutes: number): string {
+  const [hours, minutes] = time.split(':').map(Number)
+  const totalMinutes = (hours * 60) + minutes + deltaMinutes
+  const nextHours = Math.floor(totalMinutes / 60)
+  const nextMinutes = totalMinutes % 60
+  return `${String(nextHours).padStart(2, '0')}:${String(nextMinutes).padStart(2, '0')}`
+}
 
 function seedTask(
   fields: Omit<Task, 'splitAllowed' | 'pinned' | 'updatedAt' | 'linkedCalendarBlockIds' | 'scheduledMinutes' | 'schedulingProgress'> & {
@@ -334,22 +343,24 @@ interface PlannerState {
   createManyFromIntake: (events: IntakeEventData[], tasks: IntakeTaskData[]) => void
 }
 
-export const usePlannerStore = create<PlannerState>((set) => ({
-  tasks: syncTasksWithBlocks(SEED_TASKS, SEED_BLOCKS),
-  blocks: SEED_BLOCKS,
-  protectedWindows: [],
+export const usePlannerStore = create<PlannerState>()(
+  persist(
+    (set) => ({
+      tasks: syncTasksWithBlocks(SEED_TASKS, SEED_BLOCKS),
+      blocks: SEED_BLOCKS,
+      protectedWindows: [],
 
-  // ── Execution safety initial state ────────────────────────────────────────────
-  executionHistory: [],
-  undoSnapshot: null,
+      // ── Execution safety initial state ────────────────────────────────────────────
+      executionHistory: [],
+      undoSnapshot: null,
 
-  // ── Task actions ─────────────────────────────────────────────────────────────
-  addTask: (task) => set((s) => ({ tasks: [task, ...s.tasks] })),
-  updateTask: (id, patch) =>
-    set((s) => ({ tasks: s.tasks.map((t) => t.id === id ? { ...t, ...patch, updatedAt: new Date().toISOString() } : t) })),
-  deleteTask: (id) =>
-    set((s) => ({ tasks: s.tasks.filter((t) => t.id !== id) })),
-  togglePin: (id) =>
+      // ── Task actions ─────────────────────────────────────────────────────────────
+      addTask: (task) => set((s) => ({ tasks: [task, ...s.tasks] })),
+      updateTask: (id, patch) =>
+        set((s) => ({ tasks: s.tasks.map((t) => t.id === id ? { ...t, ...patch, updatedAt: new Date().toISOString() } : t) })),
+      deleteTask: (id) =>
+        set((s) => ({ tasks: s.tasks.filter((t) => t.id !== id) })),
+      togglePin: (id) =>
     set((s) => ({ tasks: s.tasks.map((t) => t.id === id ? { ...t, pinned: !t.pinned, updatedAt: new Date().toISOString() } : t) })),
 
   // ── Block actions ─────────────────────────────────────────────────────────────
@@ -359,10 +370,25 @@ export const usePlannerStore = create<PlannerState>((set) => ({
   }),
   updateBlock: (id, patch) =>
     set((s) => {
-      const blocks = s.blocks.map((b) => b.id === id ? { ...b, ...patch, updatedAt: new Date().toISOString() } : b)
-      const protectedWindows = patch.protectedWindowId || patch.isProtectedTime === false
-        ? s.protectedWindows.map((window) => window.blockId === id ? { ...window, updatedAt: new Date().toISOString() } : window)
-        : s.protectedWindows
+      const now = new Date().toISOString()
+      const blocks = s.blocks.map((b) => b.id === id ? { ...b, ...patch, updatedAt: now } : b)
+      const updatedBlock = blocks.find((block) => block.id === id)
+      const protectedWindows = updatedBlock?.protectedWindowId
+        ? s.protectedWindows.map((window) => (
+            window.id === updatedBlock.protectedWindowId
+              ? {
+                  ...window,
+                  date: updatedBlock.date,
+                  startTime: updatedBlock.startTime,
+                  endTime: addMinsToTime(updatedBlock.startTime, updatedBlock.duration),
+                  durationMinutes: updatedBlock.duration,
+                  updatedAt: now,
+                }
+              : window
+          ))
+        : patch.protectedWindowId || patch.isProtectedTime === false
+          ? s.protectedWindows.map((window) => window.blockId === id ? { ...window, updatedAt: now } : window)
+          : s.protectedWindows
       return { blocks, tasks: syncTasksWithBlocks(s.tasks, blocks), protectedWindows }
     }),
   deleteBlock: (id) =>
@@ -651,51 +677,73 @@ export const usePlannerStore = create<PlannerState>((set) => ({
     })
   },
 
-  createManyFromIntake: (events, intakeTasks) => {
-    set((s) => {
-      const now = new Date().toISOString()
+      createManyFromIntake: (events, intakeTasks) => {
+        set((s) => {
+          const now = new Date().toISOString()
 
-      const newBlocks: CalendarBlock[] = events.map((e) => ({
-        id:         uid('block'),
-        title:      e.title,
-        date:       e.date,
-        startTime:  e.startTime,
-        duration:   e.durationMinutes ?? 60,
-        color:      '#00d4ff',
-        type:       'event' as BlockType,
-        locked:     e.locked,
-        flexible:   false,
-        recurring:  false,
-        source:     'manual' as BlockSource,
-        notes:      e.notes,
-        createdAt:  now,
-        updatedAt:  now,
-      }))
+          const newBlocks: CalendarBlock[] = events.map((e) => ({
+            id:         uid('block'),
+            title:      e.title,
+            date:       e.date,
+            startTime:  e.startTime,
+            duration:   e.durationMinutes ?? 60,
+            color:      '#00d4ff',
+            type:       'event' as BlockType,
+            locked:     e.locked,
+            flexible:   false,
+            recurring:  false,
+            source:     'manual' as BlockSource,
+            notes:      e.notes,
+            createdAt:  now,
+            updatedAt:  now,
+          }))
 
-      const newTasks: Task[] = intakeTasks.map((t) => ({
-        id:                     uid('task'),
-        title:                  t.title,
-        description:            t.notes,
-        status:                 'todo' as TaskStatus,
-        priority:               (t.priority ?? 'medium') as TaskPriority,
-        dueDate:                t.dueDate ?? undefined,
-        durationMinutes:        t.durationMinutes ?? 60,
-        energyType:             (t.energyType ?? 'moderate') as EnergyType,
-        scheduled:              false,
-        completed:              false,
-        tags:                   [],
-        linkedCalendarBlockIds: [],
-        scheduledMinutes:       0,
-        schedulingProgress:     0,
-        splitAllowed:           false,
-        pinned:                 false,
-        createdAt:              now,
-        updatedAt:              now,
-      }))
+          const newTasks: Task[] = intakeTasks.map((t) => ({
+            id:                     uid('task'),
+            title:                  t.title,
+            description:            t.notes,
+            status:                 'todo' as TaskStatus,
+            priority:               (t.priority ?? 'medium') as TaskPriority,
+            dueDate:                t.dueDate ?? undefined,
+            durationMinutes:        t.durationMinutes ?? 60,
+            energyType:             (t.energyType ?? 'moderate') as EnergyType,
+            scheduled:              false,
+            completed:              false,
+            tags:                   [],
+            linkedCalendarBlockIds: [],
+            scheduledMinutes:       0,
+            schedulingProgress:     0,
+            splitAllowed:           false,
+            pinned:                 false,
+            createdAt:              now,
+            updatedAt:              now,
+          }))
 
-      const allBlocks = [...s.blocks, ...newBlocks]
-      const allTasks  = syncTasksWithBlocks([...newTasks, ...s.tasks], allBlocks)
-      return { blocks: allBlocks, tasks: allTasks }
-    })
-  },
-}))
+          const allBlocks = [...s.blocks, ...newBlocks]
+          const allTasks  = syncTasksWithBlocks([...newTasks, ...s.tasks], allBlocks)
+          return { blocks: allBlocks, tasks: allTasks }
+        })
+      },
+    }),
+    {
+      name: 'jarvis-planner-v1',
+      partialize: (state) => ({
+        tasks: state.tasks,
+        blocks: state.blocks,
+        protectedWindows: state.protectedWindows,
+      }),
+      merge: (persisted, current) => {
+        const stored = (persisted as Partial<Pick<PlannerState, 'tasks' | 'blocks' | 'protectedWindows'>>) ?? {}
+        const blocks = stored.blocks ?? current.blocks
+        const tasks = syncTasksWithBlocks(stored.tasks ?? current.tasks, blocks)
+
+        return {
+          ...current,
+          tasks,
+          blocks,
+          protectedWindows: stored.protectedWindows ?? current.protectedWindows,
+        }
+      },
+    },
+  ),
+)

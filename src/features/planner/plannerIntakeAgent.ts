@@ -253,10 +253,13 @@ export function isIntakeIntent(input: string): boolean {
 
   const hasEvent = EVENT_KEYWORDS.test(s)
   const hasTask  = TASK_KEYWORDS.test(s)
+  const hasTime  = /\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\b([01]?\d|2[0-3]):([0-5]\d)\b|\bat\s+\d{1,2}\b|\bnoon\b|\bmidnight\b/i.test(s)
   const hasDate  =
     /\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december|\d{1,2}(?:st|nd|rd|th)?\s+of\s+\w+|next\s+week|this\s+week)\b/i.test(s)
+  const hasCreateIntent =
+    /\b(add|create|put|book|block|set up|schedule|remind me|remember|note down)\b/i.test(s)
 
-  return (hasEvent || hasTask) && hasDate
+  return ((hasEvent || hasTask) && hasDate) || (hasCreateIntent && hasDate && hasTime)
 }
 
 // ── Main entry point ───────────────────────────────────────────────────────────

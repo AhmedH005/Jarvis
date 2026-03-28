@@ -6,6 +6,8 @@ import { HudCornerPanel, PanelRow } from '@/components/hud/HudCornerPanel'
 import { InputBar } from '@/components/chat/InputBar'
 import { MessageList } from '@/components/chat/MessageList'
 import { getReactorDisplayStatus } from '@/lib/reactor-display'
+import { OptimizePreviewPanel } from '@/features/planner/OptimizePreviewPanel'
+import { IntakePreviewPanel }   from '@/features/planner/IntakePreviewPanel'
 
 export function JarvisHomeTab() {
   const config = useJarvisStore((s) => s.config)
@@ -17,6 +19,11 @@ export function JarvisHomeTab() {
   const sessionStart = useJarvisStore((s) => s.sessionStart)
   const setStreamPhase = useJarvisStore((s) => s.setStreamPhase)
   const streamPhase = useJarvisStore((s) => s.streamPhase)
+  const plannerPreview = useJarvisStore((s) => s.plannerPreview)
+  const setPlannerPreview = useJarvisStore((s) => s.setPlannerPreview)
+  const setActivePlanSession = useJarvisStore((s) => s.setActivePlanSession)
+  const intakePreview = useJarvisStore((s) => s.intakePreview)
+  const setIntakePreview = useJarvisStore((s) => s.setIntakePreview)
 
   const [clock, setClock] = useState('')
   const [energy, setEnergy] = useState(84)
@@ -83,6 +90,7 @@ export function JarvisHomeTab() {
   const gatewayColor = displayStatus.color
   const gatewayCoreValue = displayStatus.coreValue
   const gatewayConnectionValue = displayStatus.connectionValue
+  const optimizeType = plannerPreview?.result && 'weekStart' in plannerPreview.result ? 'week' : 'day'
 
   return (
     <div className="flex flex-1 min-h-0 overflow-visible gap-3 px-3 py-3">
@@ -187,6 +195,28 @@ export function JarvisHomeTab() {
             background: 'linear-gradient(to right, transparent, rgba(0,212,255,0.18), transparent)',
           }}
         />
+
+        {plannerPreview?.result && (
+          <div className="w-full flex-shrink-0 mb-2" style={{ border: '1px solid rgba(157,78,221,0.12)', background: 'rgba(157,78,221,0.035)' }}>
+            <OptimizePreviewPanel
+              result={plannerPreview.result}
+              optimizeType={optimizeType}
+              onDismiss={() => {
+                setPlannerPreview(null)
+                setActivePlanSession(null)
+              }}
+            />
+          </div>
+        )}
+
+        {intakePreview && (
+          <div className="w-full flex-shrink-0 mb-2" style={{ border: '1px solid rgba(0,255,136,0.1)', background: 'rgba(0,255,136,0.02)' }}>
+            <IntakePreviewPanel
+              response={intakePreview}
+              onDismiss={() => setIntakePreview(null)}
+            />
+          </div>
+        )}
 
         <div className="flex-1 w-full min-h-0 overflow-hidden">
           <MessageList />

@@ -15,10 +15,11 @@ import { TabNav } from './TabNav'
 import { CommandPalette } from './CommandPalette'
 import { AgentsTab } from './AgentsTab'
 import { TasksTab } from './TasksTab'
-import { NewCalendarTab } from './NewCalendarTab'
+import { CalendarTab } from './CalendarTab'
 import { AutomationsTab } from './AutomationsTab'
 import { DashboardTab } from './DashboardTab'
 import { ConciergeTab } from './ConciergeTab'
+import { MusicStudioTab } from './MusicStudioTab'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import type { TabId } from '@/adapters/backend-files'
 
@@ -105,7 +106,7 @@ export function TabShell() {
                 <ErrorBoundary><TasksTab /></ErrorBoundary>
               )}
               {activeTab === 'calendar' && (
-                <ErrorBoundary><NewCalendarTab /></ErrorBoundary>
+                <ErrorBoundary><CalendarTab /></ErrorBoundary>
               )}
               {activeTab === 'automations' && (
                 <ErrorBoundary><AutomationsTab /></ErrorBoundary>
@@ -118,6 +119,9 @@ export function TabShell() {
               )}
               {activeTab === 'coding' && (
                 <ErrorBoundary><CodingTeamLoader /></ErrorBoundary>
+              )}
+              {activeTab === 'music' && (
+                <ErrorBoundary><MusicStudioTab /></ErrorBoundary>
               )}
             </motion.div>
           </AnimatePresence>
