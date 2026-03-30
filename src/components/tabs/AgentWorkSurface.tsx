@@ -12,10 +12,10 @@ import {
 } from 'lucide-react'
 import { ResearcherSurface } from './ResearcherSurface'
 import type { BuilderPlanResult } from '@/adapters/builder-plan'
-import { loadBuilderExecutionHistory, type BuilderExecutionHistoryEntry, type BuilderExecutionHistorySnapshot } from '@/adapters/builder-execution'
+import type { BuilderExecutionHistoryEntry, BuilderExecutionHistorySnapshot } from '@/adapters/builder-execution'
 import { createBuilderRemediationRequest, type BuilderExecutionRequest } from '@/adapters/builder-execution-request'
-import { verifyCheckerRun } from '@/adapters/checker'
 import { focusMatchesTarget, type AgentControlSurface } from '@/adapters/agent-control'
+import { getBuilderProvider } from '@/integrations/registry/providerRegistry'
 import { useBuilderExecutionStore } from '@/store/builder-execution'
 import { useBuilderExecutionRequestStore } from '@/store/builder-execution-request'
 import { useBuilderPlanStore } from '@/store/builder-plan'
@@ -210,6 +210,14 @@ function planMatchesFocus(surface: AgentControlSurface, plan: BuilderPlanResult 
   return Boolean(plan && focusMatchesTarget(surface.focusTarget, plan.target, plan.likelyFiles))
 }
 
+async function loadHistoryFromProvider(): Promise<BuilderExecutionHistorySnapshot> {
+  const result = await getBuilderProvider().loadHistory()
+  if (!result.ok || !result.data) {
+    throw new Error(result.failure?.message ?? result.summary)
+  }
+  return result.data
+}
+
 // ── Main export ────────────────────────────────────────────────────────────────
 // Renders in two modes:
 //   mode="actions"  → only the actionable section (Needs Action) — used as primary visible content
@@ -321,7 +329,7 @@ export function AgentWorkSurface({
   useEffect(() => {
     if (!matchingRun || matchingRun.executionState === 'started') return
 
-    void loadBuilderExecutionHistory()
+    void loadHistoryFromProvider()
       .then(onHistoryChange)
       .catch(() => undefined)
   }, [matchingRun?.runId, matchingRun?.executionState, onHistoryChange])
@@ -349,11 +357,15 @@ export function AgentWorkSurface({
   const handleVerify = async (runId: string) => {
     setVerifyPendingId(runId)
     try {
-      const result = await verifyCheckerRun(runId, verifyInputs[runId]?.trim() || undefined)
-      const refreshed = await loadBuilderExecutionHistory()
+      const result = await getBuilderProvider().verifyRun(runId, verifyInputs[runId]?.trim() || undefined)
+      if (!result.ok || !result.data) {
+        throw new Error(result.failure?.message ?? result.summary)
+      }
+      const verificationNote = result.data.note
+      const refreshed = await loadHistoryFromProvider()
       onHistoryChange(refreshed)
       setVerifyInputs((state) => ({ ...state, [runId]: '' }))
-      setVerifyFeedback((state) => ({ ...state, [runId]: result.note }))
+      setVerifyFeedback((state) => ({ ...state, [runId]: verificationNote }))
     } catch (error) {
       setVerifyFeedback((state) => ({
         ...state,
@@ -378,7 +390,11 @@ export function AgentWorkSurface({
 
     for (const entry of targets) {
       try {
-        await verifyCheckerRun(entry.runId)
+        const result = await getBuilderProvider().verifyRun(entry.runId)
+        if (!result.ok || !result.data) {
+          failed++
+          continue
+        }
         succeeded++
       } catch {
         failed++
@@ -388,7 +404,7 @@ export function AgentWorkSurface({
 
     // Single history refresh after all calls complete
     try {
-      const refreshed = await loadBuilderExecutionHistory()
+      const refreshed = await loadHistoryFromProvider()
       onHistoryChange(refreshed)
     } catch {
       // Refresh failure is non-fatal; history will update on next interaction
@@ -828,7 +844,7 @@ export function AgentWorkSurface({
       onClose={() => setSelectedRun(null)}
       remediatedRunIds={remediatedSourceRunIds}
       onHistoryRefresh={async () => {
-        const refreshed = await loadBuilderExecutionHistory()
+        const refreshed = await loadHistoryFromProvider()
         onHistoryChange(refreshed)
       }}
       onRequestCreated={queueRequest}

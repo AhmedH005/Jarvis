@@ -38,6 +38,11 @@ import type {
   GmailSendResult,
   GmailStatus,
 } from '@/shared/gmail-bridge'
+import type {
+  GCalStatusResult,
+  GCalListEventsResult,
+} from '@/shared/gcal-bridge'
+import type { RuntimeDiagnostics } from '@/shared/runtime-bridge'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -129,6 +134,13 @@ declare global {
           history?: Array<{ role: string; content: string }>
         ) => Promise<void>
         onStream: (cb: (event: { type: string; payload: string }) => void) => (() => void)
+        /**
+         * Non-streaming command classification (model-assisted router).
+         * Returns raw JSON text from Claude Haiku, or an error payload.
+         */
+        classify?: (
+          command: string
+        ) => Promise<{ ok: true; text: string } | { ok: false; error: string; code: string }>
       }
       music: {
         generate: (prompt: string) => Promise<
@@ -148,6 +160,17 @@ declare global {
         fetchRecent: () => Promise<GmailFetchResult>
         sendMessage: (input: GmailSendInput) => Promise<GmailSendResult>
         status: () => Promise<GmailStatus>
+      }
+      gcal?: {
+        status: () => Promise<GCalStatusResult>
+        listEvents: (params?: { timeMin?: string; timeMax?: string; maxResults?: number }) => Promise<GCalListEventsResult>
+      }
+      ics?: {
+        fetchUrl: (url: string) => Promise<{ ok: true; text: string } | { ok: false; error: string }>
+        getConfig: () => Promise<{ icsUrl?: string; caldavUrl?: string }>
+      }
+      runtime: {
+        getDiagnostics: () => Promise<RuntimeDiagnostics>
       }
       planner: {
         ping: () => Promise<PlannerBridgeResult>

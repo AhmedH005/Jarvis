@@ -1,22 +1,6 @@
 import type { AgentOutput, TrackType } from '@/store/music'
 import type { TrackBlueprint } from '@/features/music/types'
-
-// ── Audio helpers ─────────────────────────────────────────────────────────────
-
-const SILENT_WAV =
-  'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='
-
-function mockAudioUrl(): string {
-  return SILENT_WAV
-}
-
-/** Decode a base64 audio string into a blob URL playable by an <audio> element. */
-function base64ToBlobUrl(base64: string, mimeType: string): string {
-  const binary = window.atob(base64)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-  return URL.createObjectURL(new Blob([bytes], { type: mimeType }))
-}
+import { getMediaProvider } from '@/integrations/registry/providerRegistry'
 
 /** Build the ElevenLabs prompt from blueprint + user intent. */
 function buildApiPrompt(userPrompt: string, bp: TrackBlueprint): string {
@@ -96,8 +80,8 @@ function buildDescription(
 
 /**
  * Generate a single instrument layer.
- * The Studio pass routes to generateFullSong (real API) so the final mix
- * always has real audio. Individual instrument passes stay mock.
+ * Only the Studio pass has a real media backend today. Individual instrument
+ * passes stay descriptive-only instead of fabricating silent audio.
  */
 export async function generateInstrument(
   prompt: string,
@@ -109,8 +93,6 @@ export async function generateInstrument(
     return generateFullSong(prompt, blueprint)
   }
 
-  await delay(jitter(800, 600))
-
   const effectiveBlueprint: TrackBlueprint = blueprint ?? {
     key: 'C major',
     bpm: 100,
@@ -121,15 +103,15 @@ export async function generateInstrument(
 
   return {
     type,
-    description: buildDescription(instrument, type, prompt, effectiveBlueprint),
-    audioUrl: mockAudioUrl(),
+    description: `${buildDescription(instrument, type, prompt, effectiveBlueprint)}. No standalone ${instrument.toLowerCase()} generation provider is configured yet, so this layer is descriptive only.`,
+    audioUrl: null,
   }
 }
 
 /**
  * Generate the final mix audio.
- * Calls ElevenLabs Sound Generation via IPC when the API key is configured.
- * Falls back to mock audio if the key is absent or the call fails.
+ * Routes through the media provider and reports truthful unavailability instead
+ * of falling back to fake audio.
  */
 export async function generateFullSong(
   prompt: string,
@@ -144,24 +126,20 @@ export async function generateFullSong(
   }
 
   const description = buildDescription('Studio', 'full', prompt, effectiveBlueprint)
+  const result = await getMediaProvider().generateTrack(buildApiPrompt(prompt, effectiveBlueprint), effectiveBlueprint)
 
-  // ── ElevenLabs via IPC ────────────────────────────────────────────────────
-  const musicBridge = window.jarvis?.music
-  if (musicBridge) {
-    try {
-      const apiPrompt = buildApiPrompt(prompt, effectiveBlueprint)
-      const result = await musicBridge.generate(apiPrompt)
-      if (result.ok) {
-        console.log('[musicService] ElevenLabs audio ready', { bytes: result.bytes })
-        return { type: 'full', description, audioUrl: base64ToBlobUrl(result.audioBase64, result.mimeType) }
-      }
-      console.warn('[musicService] ElevenLabs returned error:', result.error)
-    } catch (err) {
-      console.warn('[musicService] ElevenLabs call failed, using mock:', err)
+  if (!result.ok) {
+    await delay(jitter(200, 100))
+    return {
+      type: 'full',
+      description: `${description}. Audio generation unavailable: ${result.failure?.message ?? result.summary}`,
+      audioUrl: null,
     }
   }
 
-  // ── Fallback: mock ────────────────────────────────────────────────────────
-  await delay(jitter(1800, 800))
-  return { type: 'full', description, audioUrl: mockAudioUrl() }
+  return {
+    type: 'full',
+    description,
+    audioUrl: result.data?.audioUrl ?? null,
+  }
 }

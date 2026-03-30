@@ -892,7 +892,7 @@ export function markBookingCalling(requestId: string, linkedCallId?: string): vo
   })
 }
 
-function buildCalendarEvent(result: BookingExecutionResult, request: BookingRequest): string | undefined {
+async function buildCalendarEvent(result: BookingExecutionResult, request: BookingRequest): Promise<string | undefined> {
   const date = result.confirmedDetails?.date ?? request.brief.date
   const time = result.confirmedDetails?.time ?? request.brief.preferredTime
   if (!date || !time) return undefined
@@ -905,7 +905,7 @@ function buildCalendarEvent(result: BookingExecutionResult, request: BookingRequ
   const end = new Date(start)
   end.setMinutes(end.getMinutes() + (request.type === 'appointment' ? 60 : 90))
 
-  const event = createEvent({
+  const event = await createEvent({
     title: request.selectedOption?.placeName ?? request.brief.title,
     start: start.toISOString(),
     end: end.toISOString(),
@@ -922,10 +922,10 @@ function buildCalendarEvent(result: BookingExecutionResult, request: BookingRequ
   return event.success ? event.data.id : undefined
 }
 
-export function applyBookingExecutionResult(
+export async function applyBookingExecutionResult(
   requestId: string,
   result: Omit<BookingExecutionResult, 'linkedCalendarEventId'>,
-): BookingExecutionResult | null {
+): Promise<BookingExecutionResult | null> {
   const store = useConciergeStore.getState()
   const request = getBookingRequest(requestId)
   if (!request) return null
@@ -937,7 +937,9 @@ export function applyBookingExecutionResult(
     return request.executionResult
   }
 
-  const linkedCalendarEventId = result.status === 'confirmed' ? buildCalendarEvent(result, request) : undefined
+  const linkedCalendarEventId = result.status === 'confirmed'
+    ? await buildCalendarEvent(result, request)
+    : undefined
   const finalResult: BookingExecutionResult = {
     ...result,
     linkedCalendarEventId,

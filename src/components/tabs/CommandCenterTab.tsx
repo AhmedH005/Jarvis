@@ -14,6 +14,7 @@ import {
   Search,
   Send,
   ShieldCheck,
+  Sparkles,
   Target,
   Terminal,
   Trash2,
@@ -66,6 +67,10 @@ const ACTION_MODE_LABEL: Record<MissionActionMode, string> = {
   'remediation':        'Remediation request',
   'ops-check':          'Ops health check',
   'research':           'Gather context',
+  'concierge-workflow': 'Concierge workflow',
+  'calendar-write':     'Calendar action',
+  'memory-retrieval':   'Memory retrieval',
+  'media-generation':   'Media generation',
 }
 
 const ACTION_MODE_ICON: Record<MissionActionMode, typeof Target> = {
@@ -75,6 +80,10 @@ const ACTION_MODE_ICON: Record<MissionActionMode, typeof Target> = {
   'remediation':        FileSearch,
   'ops-check':          Activity,
   'research':           Search,
+  'concierge-workflow': Sparkles,
+  'calendar-write':     BookmarkPlus,
+  'memory-retrieval':   Save,
+  'media-generation':   Layers,
 }
 
 // ── Confidence chip ────────────────────────────────────────────────────────────
@@ -147,6 +156,7 @@ function RouteCard({ route }: { route: MissionRoute }) {
   const style = AGENT_STYLE[route.agentId]
   const AgentIcon = AGENT_ICON[route.agentId]
   const isHandedOff = phase === 'handed-off'
+  const routeUnavailable = route.executionState === 'unavailable'
 
   return (
     <motion.div
@@ -242,6 +252,20 @@ function RouteCard({ route }: { route: MissionRoute }) {
         </div>
       )}
 
+      {routeUnavailable && route.unavailableReason && (
+        <div
+          className="mt-3 rounded-lg px-3 py-2.5"
+          style={{
+            background: 'rgba(255,107,53,0.06)',
+            border: '1px solid rgba(255,107,53,0.16)',
+          }}
+        >
+          <p className="text-[11px] leading-snug" style={{ color: '#ff6b35' }}>
+            {route.unavailableReason}
+          </p>
+        </div>
+      )}
+
       {/* Truthfulness note */}
       <div
         className="mt-3 rounded-lg px-3 py-2"
@@ -251,7 +275,9 @@ function RouteCard({ route }: { route: MissionRoute }) {
         }}
       >
         <p className="text-[10px] font-mono" style={{ color: 'rgba(0,212,255,0.48)' }}>
-          This is a routing suggestion only. No execution has started. Navigate to the Agents tab to proceed through the real pipeline.
+          {routeUnavailable
+            ? 'This route is unavailable right now. No handoff or execution will be staged until the backing provider is healthy.'
+            : 'This is a routing suggestion only. No execution has started. Navigate to the Agents tab to proceed through the real pipeline.'}
         </p>
       </div>
 
@@ -262,17 +288,21 @@ function RouteCard({ route }: { route: MissionRoute }) {
             onClick={confirmHandoff}
             className="flex items-center gap-2 rounded-lg px-4 py-2.5"
             style={{
-              background: `${style.accent}18`,
-              border: `1px solid ${style.accent}35`,
-              color: style.accent,
-              cursor: 'pointer',
+              background: routeUnavailable ? 'rgba(255,255,255,0.04)' : `${style.accent}18`,
+              border: routeUnavailable ? '1px solid rgba(255,255,255,0.10)' : `1px solid ${style.accent}35`,
+              color: routeUnavailable ? 'rgba(192,232,240,0.38)' : style.accent,
+              cursor: routeUnavailable ? 'not-allowed' : 'pointer',
+              opacity: routeUnavailable ? 0.8 : 1,
             }}
-            whileHover={{ background: `${style.accent}28`, borderColor: `${style.accent}55` }}
-            whileTap={{ scale: 0.97 }}
+            whileHover={routeUnavailable ? undefined : { background: `${style.accent}28`, borderColor: `${style.accent}55` }}
+            whileTap={routeUnavailable ? undefined : { scale: 0.97 }}
+            disabled={routeUnavailable}
           >
             <ArrowRight className="h-4 w-4" />
             <span className="text-[11px] font-mono tracking-[0.14em]">
-              CONFIRM HANDOFF TO {route.agentName.toUpperCase()}
+              {routeUnavailable
+                ? 'BACKING PROVIDER UNAVAILABLE'
+                : `CONFIRM HANDOFF TO ${route.agentName.toUpperCase()}`}
             </span>
           </motion.button>
         ) : (
@@ -839,7 +869,7 @@ const WORKFLOWS: Workflow[] = [
     body:  'Work already started. Inspect queue, activity feed, and run detail.',
     route: 'System → queue · history · run detail',
     color: '#00ff88',
-    tab:   'coding',
+    tab:   'dev',
   },
 ]
 

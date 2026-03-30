@@ -90,7 +90,7 @@ async function executeCreateEvent(action: Extract<PlannedAction, { type: 'create
   const startDt = new Date(`${action.date}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00`)
   const endDt = new Date(startDt.getTime() + action.duration * 60_000)
 
-  const result = createEvent({
+  const result = await createEvent({
     title: action.title,
     start: startDt.toISOString().replace(/\.\d{3}Z$/, ''),
     end: endDt.toISOString().replace(/\.\d{3}Z$/, ''),
@@ -109,7 +109,7 @@ async function executeCreateEvent(action: Extract<PlannedAction, { type: 'create
 
 async function executeCreateTask(action: Extract<PlannedAction, { type: 'create_task' }>): Promise<{ summary: string }> {
   // Create as a CalendarEvent with allDay=true (portable, no planner store coupling)
-  const result = createEvent({
+  const result = await createEvent({
     title: `📌 ${action.title}`,
     start: action.dueDate,
     end: action.dueDate,
@@ -128,7 +128,7 @@ async function executeCreateRecurring(action: Extract<PlannedAction, { type: 'cr
   const startDt = new Date(`${action.startDate}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00`)
   const endDt = new Date(startDt.getTime() + action.duration * 60_000)
 
-  const result = createRecurringEvents(
+  const result = await createRecurringEvents(
     {
       title: action.title,
       start: startDt.toISOString().replace(/\.\d{3}Z$/, ''),
@@ -189,7 +189,7 @@ async function executeUpdateEvent(action: UpdateEventPlan, session: ReturnType<t
       continue
     }
 
-    const result = moveEvent(ev.id, newStart, newEnd)
+    const result = await moveEvent(ev.id, newStart, newEnd)
     if (result.success) updated.push(result.data)
   }
 
@@ -214,7 +214,7 @@ async function executeDeleteEvent(action: Extract<PlannedAction, { type: 'delete
     return { summary: `Could not find an event matching "${action.titleHint}". Be more specific?` }
   }
 
-  const result = deleteEvent(candidate.id)
+  const result = await deleteEvent(candidate.id)
   if (!result.success) return { summary: `Failed to delete: ${result.error}` }
   return { summary: `Deleted "${candidate.title}" (${formatDate(candidate.start.slice(0, 10))}).` }
 }
@@ -283,7 +283,7 @@ async function executeBulkMove(action: BulkMovePlan): Promise<{ summary: string;
 
     const newEnd = new Date(new Date(newStart).getTime() + durationMs)
       .toISOString().replace(/\.\d{3}Z$/, '')
-    const result = moveEvent(ev.id, newStart, newEnd)
+    const result = await moveEvent(ev.id, newStart, newEnd)
     if (result.success) moved.push(result.data)
   }
 
@@ -301,7 +301,7 @@ async function executeBulkMove(action: BulkMovePlan): Promise<{ summary: string;
 }
 
 async function executeListEvents(action: Extract<PlannedAction, { type: 'list_events' }>): Promise<{ summary: string; events: CalendarEvent[] }> {
-  const result = listEvents({ from: action.dateFrom, to: action.dateTo })
+  const result = await listEvents({ from: action.dateFrom, to: action.dateTo })
   if (!result.success) return { summary: 'Failed to list events.', events: [] }
 
   const evs = result.data

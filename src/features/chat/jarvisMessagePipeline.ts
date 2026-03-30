@@ -1,201 +1,123 @@
 import { nanoid } from '@/lib/utils'
+import { getOrchestratorProvider } from '@/integrations/registry/providerRegistry'
 import { useJarvisStore } from '@/store/jarvis'
-import { usePlannerStore } from '@/store/planner'
-import { handlePlannerCommand, isPlannerIntent } from '@/features/planner/plannerCommandRouter'
-import { handlePlanRefinement, isPlanRefinementIntent } from '@/features/planner/plannerRefinement'
-import { handlePlannerIntake, isIntakeIntent } from '@/features/planner/plannerIntakeAgent'
-import { handleCalendarIntent, isCalendarIntent } from '@/calendar/calendarNLP'
-import type { Message, StreamEvent } from '@/types'
+import { classifyCommand, toOrchestratorRoute } from './model-router'
+import type { TypedRouteResult } from './router-types'
+import type { Message } from '@/types'
 
 export interface JarvisPipelineResult {
   replyText: string
-  route: 'refinement' | 'intake' | 'planner' | 'calendar' | 'chat'
+  route: 'command'
+  routeResult: TypedRouteResult
 }
+
+// ── Reply formatting ──────────────────────────────────────────────────────────
+
+function formatRouteReply(result: TypedRouteResult): string {
+  const lines: string[] = []
+
+  // Header — domain + routing method badge
+  const methodBadge =
+    result.routedBy === 'routed_by_model'         ? '[MODEL]'
+    : result.routedBy === 'routed_with_low_confidence' ? '[MODEL/LOW CONF]'
+    : result.routedBy === 'routed_by_fallback'     ? '[FALLBACK]'
+    : '[MANUAL REVIEW]'
+
+  lines.push(`${result.targetDomain.toUpperCase()} ROUTE ${methodBadge}`)
+  lines.push(result.intent)
+  lines.push('')
+
+  // Routing details
+  lines.push(`Confidence: ${result.confidence}`)
+  lines.push(`Approval: ${result.requiresApproval ? 'required once dry run is lifted' : 'not required for staging'}`)
+  lines.push(`Action: ${result.suggestedAction}`)
+  lines.push('Execution: Blocked (dry run).')
+
+  // Entities — only show if any were found
+  const { dates, contacts, keywords } = result.extractedEntities
+  const entityParts: string[] = []
+  if (dates.length > 0) entityParts.push(`dates=[${dates.join(', ')}]`)
+  if (contacts.length > 0) entityParts.push(`contacts=[${contacts.join(', ')}]`)
+  if (keywords.length > 0) entityParts.push(`keywords=[${keywords.join(', ')}]`)
+  if (entityParts.length > 0) {
+    lines.push('')
+    lines.push(`Entities: ${entityParts.join('  ')}`)
+  }
+
+  // Rationale / fallback note
+  lines.push('')
+  lines.push(result.rationale)
+  if (result.fallbackReason) {
+    lines.push(`Fallback reason: ${result.fallbackReason}`)
+  }
+  if (result.modelUsed) {
+    lines.push(`Classified by: ${result.modelUsed}`)
+  }
+
+  return lines.join('\n')
+}
+
+// ── Pipeline ──────────────────────────────────────────────────────────────────
 
 export async function submitJarvisMessage(userText: string): Promise<JarvisPipelineResult> {
   const text = userText.trim()
   if (!text) {
-    return { replyText: '', route: 'chat' }
+    const empty: TypedRouteResult = {
+      targetDomain: 'command',
+      intent: 'Empty input',
+      confidence: 'low',
+      routedBy: 'manual_review_required',
+      requiresApproval: false,
+      suggestedAction: 'clarify',
+      extractedEntities: { dates: [], contacts: [], keywords: [] },
+      rationale: 'No input provided.',
+    }
+    return { replyText: '', route: 'command', routeResult: empty }
   }
 
   const jarvis = useJarvisStore.getState()
-  const planner = usePlannerStore.getState()
-
   const {
     addMessage,
-    applyStreamEvent,
-    pushLog,
-    conversationId,
-    messages,
-    plannerPreview,
-    activePlanSession,
     setPlannerPreview,
     setActivePlanSession,
     setIntakePreview,
     setStreamPhase,
   } = jarvis
 
-  const history = messages.slice(-12).map((message) => ({
-    role: message.role as 'user' | 'assistant',
-    content: message.content,
-  }))
-
   addMessage({ id: nanoid(), role: 'user', content: text, timestamp: new Date() } as Message)
+  setStreamPhase('start')
 
-  const plannerDate = new Date().toISOString().split('T')[0]
-  const plannerContext = {
-    currentDate: plannerDate,
-    selectedDate: plannerDate,
-    tasks: planner.tasks,
-    blocks: planner.blocks,
-  }
+  // ── Model-assisted classification ─────────────────────────────────────────
+  // classifyCommand() never throws — always returns a TypedRouteResult.
+  // Fallback to heuristic is handled internally when model is unavailable.
+  const routeResult = await classifyCommand(text)
 
-  if (activePlanSession && plannerPreview?.result && isPlanRefinementIntent(text)) {
-    pushLog(`[route:refinement] ${text.slice(0, 50)}`)
-    const plannerResponse = await handlePlanRefinement(text, activePlanSession, plannerContext)
-    setPlannerPreview(plannerResponse)
-    if (plannerResponse.result) {
-      setActivePlanSession({
-        result: plannerResponse.result,
-        command: activePlanSession.command,
-        timestamp: new Date().toISOString(),
-        refinementConstraints: plannerResponse.refinementConstraints ?? activePlanSession.refinementConstraints,
-        refinementHistory: [
-          ...activePlanSession.refinementHistory,
-          {
-            input: text,
-            timestamp: new Date().toISOString(),
-            constraints: plannerResponse.refinementConstraints ?? activePlanSession.refinementConstraints,
-          },
-        ],
-      })
-    }
-    addMessage({ id: nanoid(), role: 'assistant', content: plannerResponse.summary, timestamp: new Date() } as Message)
-    setStreamPhase('complete')
-    setTimeout(() => useJarvisStore.getState().setStreamPhase('idle'), 600)
-    return { replyText: plannerResponse.summary, route: 'refinement' }
-  }
+  // ── Adapter: TypedRouteResult → OrchestratorRoute for staging ────────────
+  const legacyRoute = toOrchestratorRoute(routeResult)
 
-  // ── Calendar route (new action layer) ────────────────────────────────────────
-  if (isCalendarIntent(text)) {
-    pushLog(`[route:calendar] ${text.slice(0, 50)}`)
-    const calResult = await handleCalendarIntent(text)
+  // ── Stage the action via the existing orchestrator contract ──────────────
+  getOrchestratorProvider().stageMission(legacyRoute, text)
 
-    if (calResult.handled) {
-      addMessage({ id: nanoid(), role: 'assistant', content: calResult.summary, timestamp: new Date() } as Message)
-      setStreamPhase('complete')
-      setTimeout(() => useJarvisStore.getState().setStreamPhase('idle'), 600)
-      return { replyText: calResult.summary, route: 'calendar' }
-    }
+  // ── Format reply ─────────────────────────────────────────────────────────
+  const reply = formatRouteReply(routeResult)
 
-    pushLog('[route:calendar] no match · continuing')
-  }
-
-  if (isIntakeIntent(text)) {
-    pushLog(`[route:intake] ${text.slice(0, 50)}`)
-    const intakeResponse = await handlePlannerIntake(text, plannerContext)
-
-    if (intakeResponse.kind !== 'unknown') {
-      setIntakePreview(intakeResponse)
-      setPlannerPreview(null)
-      setActivePlanSession(null)
-      addMessage({ id: nanoid(), role: 'assistant', content: intakeResponse.summary, timestamp: new Date() } as Message)
-      setStreamPhase('complete')
-      setTimeout(() => useJarvisStore.getState().setStreamPhase('idle'), 600)
-      return { replyText: intakeResponse.summary, route: 'intake' }
-    }
-
-    pushLog('[route:intake] nothing extracted · continuing to chat')
-  }
-
-  if (isPlannerIntent(text)) {
-    pushLog(`[route:planner] ${text.slice(0, 50)}`)
-    const plannerResponse = await handlePlannerCommand(text, plannerContext)
-
-    if (plannerResponse.command.type !== 'unknown') {
-      setPlannerPreview(plannerResponse)
-      setIntakePreview(null)
-      if (
-        plannerResponse.result &&
-        (plannerResponse.command.type === 'optimize_day' || plannerResponse.command.type === 'optimize_week')
-      ) {
-        setActivePlanSession({
-          result: plannerResponse.result,
-          command: plannerResponse.command,
-          timestamp: new Date().toISOString(),
-          refinementConstraints: plannerResponse.refinementConstraints ?? {},
-          refinementHistory: [],
-        })
-      } else {
-        setActivePlanSession(null)
-      }
-      addMessage({ id: nanoid(), role: 'assistant', content: plannerResponse.summary, timestamp: new Date() } as Message)
-      setStreamPhase('complete')
-      setTimeout(() => useJarvisStore.getState().setStreamPhase('idle'), 600)
-      return { replyText: plannerResponse.summary, route: 'planner' }
-    }
-
-    pushLog('[route:planner] command unknown · continuing to chat')
-  }
-
-  pushLog(`[route:chat] ${text.slice(0, 50)}`)
   setPlannerPreview(null)
   setIntakePreview(null)
   setActivePlanSession(null)
+  setStreamPhase('complete')
 
-  const assistantMessageId = nanoid()
-  addMessage({ id: assistantMessageId, role: 'assistant', content: '', timestamp: new Date(), streaming: true } as Message)
-  pushLog(`→ ${text.slice(0, 60)}${text.length > 60 ? '…' : ''}`)
+  addMessage({
+    id: nanoid(),
+    role: 'assistant',
+    content: reply,
+    timestamp: new Date(),
+  } as Message)
 
-  if (!window.jarvis) {
-    applyStreamEvent(assistantMessageId, { type: 'error', payload: 'No Electron bridge — run inside the app' })
-    setStreamPhase('error')
-    return { replyText: 'No Electron bridge — run inside the app', route: 'chat' }
-  }
-
-  let replyText = ''
-  let cleaned = false
-  const cleanup = (unsub: () => void) => {
-    if (!cleaned) {
-      cleaned = true
-      unsub()
-    }
-  }
-
-  await new Promise<void>((resolve) => {
-    const unsub = window.jarvis!.openclaw.onStream((event: StreamEvent) => {
-      applyStreamEvent(assistantMessageId, event)
-      if (event.type === 'token') replyText += event.payload
-      if (event.type === 'log') pushLog(event.payload, event.meta?.isToolStart ? 'info' : 'success')
-      if (event.type === 'end') {
-        pushLog('← complete', 'success')
-        cleanup(unsub)
-        resolve()
-      }
-      if (event.type === 'error') {
-        replyText = event.payload
-        pushLog(`✗ ${event.payload}`, 'error')
-        cleanup(unsub)
-        resolve()
-      }
-    })
-
-    window.jarvis!.openclaw.send(text, conversationId, history).catch((error: unknown) => {
-      const message = String(error)
-      replyText = message
-      pushLog(`Send failed: ${message}`, 'error')
-      applyStreamEvent(assistantMessageId, { type: 'error', payload: message })
-      setStreamPhase('error')
-      cleanup(unsub)
-      resolve()
-    })
-  })
-
-  return { replyText: replyText || '(no response)', route: 'chat' }
+  setTimeout(() => useJarvisStore.getState().setStreamPhase('idle'), 250)
+  return { replyText: reply, route: 'command', routeResult }
 }
 
 export async function forwardTelegramToJarvis(userText: string): Promise<string> {
   const result = await submitJarvisMessage(userText)
   return result.replyText
 }
-

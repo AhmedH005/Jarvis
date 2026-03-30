@@ -1,0 +1,199 @@
+{
+  "schemaVersion": "1.0",
+  "machine": "new-machine",
+  "updatedAt": "2026-03-29T00:00:00.000Z",
+  "providers": [
+    {
+      "provider": "composed-calendar-provider",
+      "label": "Calendar",
+      "actions": [
+        {
+          "action": "calendar:listEvents",
+          "currentStage": "staged_only",
+          "activatedAt": null,
+          "lastSmokeTestAt": null,
+          "lastSmokeTestResult": null,
+          "rollbackAvailable": true,
+          "notes": "ICS local read requires calendar.ics at jarvis-runtime/time/calendar.ics. GCal read requires GCAL_* env vars + network."
+        },
+        {
+          "action": "calendar:createEvent",
+          "currentStage": "staged_only",
+          "activatedAt": null,
+          "lastSmokeTestAt": null,
+          "lastSmokeTestResult": null,
+          "rollbackAvailable": true,
+          "notes": "Wave 3B. Requires DRY_RUN=false + write=true."
+        }
+      ]
+    },
+    {
+      "provider": "concierge-mail-skill",
+      "label": "Mail",
+      "actions": [
+        {
+          "action": "mail:fetchRecentMessages",
+          "currentStage": "staged_only",
+          "activatedAt": null,
+          "lastSmokeTestAt": null,
+          "lastSmokeTestResult": null,
+          "rollbackAvailable": true,
+          "notes": "Wave 1C. Requires GMAIL_* env vars + network=true + NO_SECRETS_MODE=false."
+        },
+        {
+          "action": "mail:sendMessage",
+          "currentStage": "staged_only",
+          "activatedAt": null,
+          "lastSmokeTestAt": null,
+          "lastSmokeTestResult": null,
+          "rollbackAvailable": true,
+          "notes": "Wave 3C. Requires DRY_RUN=false + write=true. Enable AFTER read is stable."
+        }
+      ]
+    },
+    {
+      "provider": "concierge-skill-provider",
+      "label": "Concierge",
+      "actions": [
+        {
+          "action": "concierge:syncInbox",
+          "currentStage": "staged_only",
+          "activatedAt": null,
+          "lastSmokeTestAt": null,
+          "lastSmokeTestResult": null,
+          "rollbackAvailable": true,
+          "notes": "Delegates to mail:fetchRecentMessages. Goes live with Wave 1C."
+        },
+        {
+          "action": "concierge:dispatchBooking",
+          "currentStage": "staged_only",
+          "activatedAt": null,
+          "lastSmokeTestAt": null,
+          "lastSmokeTestResult": null,
+          "rollbackAvailable": true,
+          "notes": "Wave 3D. Requires bookameeting skill installed in OpenClaw + DRY_RUN=false."
+        }
+      ]
+    },
+    {
+      "provider": "creation-speech-provider",
+      "label": "Speech",
+      "actions": [
+        {
+          "action": "speech:speak",
+          "currentStage": "staged_only",
+          "activatedAt": null,
+          "lastSmokeTestAt": null,
+          "lastSmokeTestResult": null,
+          "rollbackAvailable": true,
+          "notes": "Wave 2A. Requires ELEVENLABS_API_KEY + execute=true + network=true + NO_SECRETS_MODE=false."
+        }
+      ]
+    },
+    {
+      "provider": "creation-skill-provider",
+      "label": "Media",
+      "actions": [
+        {
+          "action": "media:generateTrack",
+          "currentStage": "staged_only",
+          "activatedAt": null,
+          "lastSmokeTestAt": null,
+          "lastSmokeTestResult": null,
+          "rollbackAvailable": true,
+          "notes": "Wave 2B. Same prerequisites as speech. Enable after speech confirmed stable."
+        }
+      ]
+    },
+    {
+      "provider": "builder-skill-provider",
+      "label": "Builder",
+      "actions": [
+        {
+          "action": "builder:requestPlan",
+          "currentStage": "staged_only",
+          "activatedAt": null,
+          "lastSmokeTestAt": null,
+          "lastSmokeTestResult": null,
+          "rollbackAvailable": true,
+          "notes": "Plan staging always works. Live execution is Wave 3E only."
+        },
+        {
+          "action": "builder:decomposeTask",
+          "currentStage": "staged_only",
+          "activatedAt": null,
+          "lastSmokeTestAt": null,
+          "lastSmokeTestResult": null,
+          "rollbackAvailable": false,
+          "notes": "Local structural decomposition. Works staged. No live execution needed."
+        },
+        {
+          "action": "builder:startExecution",
+          "currentStage": "staged_only",
+          "activatedAt": null,
+          "lastSmokeTestAt": null,
+          "lastSmokeTestResult": null,
+          "rollbackAvailable": true,
+          "notes": "Wave 3E. Final activation step. All other waves must be stable first. Requires Electron bridge."
+        }
+      ]
+    },
+    {
+      "provider": "memory-skill-provider",
+      "label": "Memory",
+      "actions": [
+        {
+          "action": "memory:snapshot",
+          "currentStage": "read_only_live_candidate",
+          "activatedAt": null,
+          "lastSmokeTestAt": null,
+          "lastSmokeTestResult": null,
+          "rollbackAvailable": false,
+          "notes": "Already live. No flags needed. Reads SAFE_ROOT files."
+        },
+        {
+          "action": "memory:write",
+          "currentStage": "staged_only",
+          "activatedAt": null,
+          "lastSmokeTestAt": null,
+          "lastSmokeTestResult": null,
+          "rollbackAvailable": true,
+          "notes": "Wave 3A. Requires DRY_RUN=false + write=true + brainrepo vetted."
+        },
+        {
+          "action": "memory:ingest",
+          "currentStage": "staged_only",
+          "activatedAt": null,
+          "lastSmokeTestAt": null,
+          "lastSmokeTestResult": null,
+          "rollbackAvailable": true,
+          "notes": "Wave 3A. Same as memory:write."
+        }
+      ]
+    },
+    {
+      "provider": "agent-task-manager-router",
+      "label": "Orchestrator",
+      "actions": [
+        {
+          "action": "orchestrator:routeMission",
+          "currentStage": "fully_live_candidate",
+          "activatedAt": null,
+          "lastSmokeTestAt": null,
+          "lastSmokeTestResult": null,
+          "rollbackAvailable": false,
+          "notes": "Pure heuristic. Always live. No flags needed."
+        },
+        {
+          "action": "orchestrator:stageMission",
+          "currentStage": "staged_only",
+          "activatedAt": null,
+          "lastSmokeTestAt": null,
+          "lastSmokeTestResult": null,
+          "rollbackAvailable": false,
+          "notes": "Produces ActionRecord. Staging is the intended behavior."
+        }
+      ]
+    }
+  ]
+}

@@ -65,6 +65,17 @@ function hasCredentials(): boolean {
   return !!(c.accountSid && c.authToken && c.fromNumber)
 }
 
+export function getPhoneWebhookConfig(): PhoneWebhookConfig {
+  const c = twilioConfig()
+  return {
+    port: c.port,
+    publicBaseUrl: c.webhookBase || null,
+    running: !!webhookServer,
+    credentialsConfigured: hasCredentials(),
+    twilioNumber: c.fromNumber || null,
+  }
+}
+
 // ── In-memory call script store ───────────────────────────────────────────────
 // Maps reqId → call script text fragments so the TwiML endpoint can serve them.
 
@@ -420,16 +431,7 @@ export function registerPhoneIpcHandlers(mainWindow: BrowserWindow): void {
   })
 
   // ── phone:webhook:config ──────────────────────────────────────────────────
-  ipcMain.handle('phone:webhook:config', (): PhoneWebhookConfig => {
-    const c = twilioConfig()
-    return {
-      port:                   c.port,
-      publicBaseUrl:          c.webhookBase || null,
-      running:                !!webhookServer,
-      credentialsConfigured:  hasCredentials(),
-      twilioNumber:           c.fromNumber || null,
-    }
-  })
+  ipcMain.handle('phone:webhook:config', (): PhoneWebhookConfig => getPhoneWebhookConfig())
 }
 
 // ── Module init ───────────────────────────────────────────────────────────────

@@ -1,3 +1,9 @@
+import type {
+  ProviderFailure,
+  ProviderResultStatus,
+  ProviderTrace,
+} from '@/integrations/contracts/base'
+
 /**
  * Portable calendar event model.
  * Provider-agnostic: no Apple, Google, or platform-specific fields.
@@ -64,5 +70,18 @@ export interface CalendarFilter {
 }
 
 export type CalendarActionResult<T = void> =
-  | { success: true; data: T }
-  | { success: false; error: string }
+  | {
+      success: true
+      data: T
+      status?: Extract<ProviderResultStatus, 'success' | 'readOnlySuccess'>
+      summary?: string
+      trace?: ProviderTrace
+    }
+  | {
+      success: false
+      error: string
+      status?: Exclude<ProviderResultStatus, 'success' | 'readOnlySuccess'>
+      summary?: string
+      failure?: ProviderFailure
+      trace?: ProviderTrace
+    }

@@ -83,7 +83,7 @@ export function InputBar() {
             isStreaming ? 'Waiting for response…'
             : !reactorVisualLive ? 'Reactor offline — click the orb to bring JARVIS online…'
             : gatewayOffline ? 'JARVIS online — gateway may still fail…'
-            : 'Ask JARVIS… (Enter to send)'
+            : 'Issue a command… (Enter to stage)'
           }
           disabled={isStreaming}
           rows={1}
@@ -136,7 +136,7 @@ export function InputBar() {
               ? <span style={{ color: 'rgba(255,154,84,0.72)' }}>○ reactor offline · click orb to activate</span>
             : gatewayOffline
               ? <span style={{ color: 'rgba(255,200,74,0.72)' }}>◌ reactor online · gateway unavailable</span>
-              : <span style={{ color: displayStatus.color }}>Enter ↵ to send  ·  Shift+Enter for newline</span>
+              : <span style={{ color: displayStatus.color }}>Enter ↵ to stage  ·  Shift+Enter for newline</span>
           }
         </p>
       </div>

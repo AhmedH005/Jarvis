@@ -39,14 +39,14 @@ export const BACKEND_PATHS = {
 
 export type TruthLabel = 'live' | 'partial' | 'blocked' | 'future'
 export type TabId =
-  | 'chat'
-  | 'tasks'
-  | 'calendar'
-  | 'automations'
-  | 'dashboard'
+  | 'command'
+  | 'time'
   | 'concierge'
-  | 'coding'
-  | 'music'
+  | 'creation'
+  | 'dev'
+  | 'memory'
+  | 'finance'
+  | 'system'
 
 export interface TabMeta {
   id: string

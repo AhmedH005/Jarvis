@@ -12,9 +12,8 @@ import type {
   BuilderExecutionHistoryEntry,
   BuilderExecutionHistorySnapshot,
 } from '@/adapters/builder-execution'
-import { loadBuilderExecutionHistory } from '@/adapters/builder-execution'
 import { createBuilderRemediationRequest } from '@/adapters/builder-execution-request'
-import { verifyCheckerRun } from '@/adapters/checker'
+import { getBuilderProvider } from '@/integrations/registry/providerRegistry'
 import { useBuilderExecutionRequestStore } from '@/store/builder-execution-request'
 import { useMissionHandoffStore } from '@/store/mission-handoff'
 import { ActionChip, CountBadge, EmptyPanel, FieldRow, PanelHeader } from './shared'
@@ -112,6 +111,14 @@ function collectTargetOptions(
   return Array.from(options.entries())
     .map(([id, label]) => ({ id, label }))
     .sort((a, b) => a.label.localeCompare(b.label))
+}
+
+async function loadHistoryFromProvider(): Promise<BuilderExecutionHistorySnapshot> {
+  const result = await getBuilderProvider().loadHistory()
+  if (!result.ok || !result.data) {
+    throw new Error(result.failure?.message ?? result.summary)
+  }
+  return result.data
 }
 
 function MonoList({
@@ -606,10 +613,13 @@ export function BuilderExecutionHistoryPanel({
   }, [targetIdFilter, targetOptions])
 
   const handleVerify = async (runId: string, verificationPrompt?: string) => {
-    const result = await verifyCheckerRun(runId, verificationPrompt)
-    const refreshed = await loadBuilderExecutionHistory()
+    const result = await getBuilderProvider().verifyRun(runId, verificationPrompt)
+    if (!result.ok || !result.data) {
+      throw new Error(result.failure?.message ?? result.summary)
+    }
+    const refreshed = await loadHistoryFromProvider()
     setCurrentHistory(refreshed)
-    return { note: result.note }
+    return { note: result.data.note }
   }
 
   const handleRemediate = async (entry: BuilderExecutionHistoryEntry, remediationPrompt: string) => {
@@ -629,7 +639,7 @@ export function BuilderExecutionHistoryPanel({
       onClose={() => setSelectedRun(null)}
       remediatedRunIds={remediatedRunIds}
       onHistoryRefresh={async () => {
-        const refreshed = await loadBuilderExecutionHistory()
+        const refreshed = await loadHistoryFromProvider()
         setCurrentHistory(refreshed)
       }}
       onRequestCreated={queueRequest}

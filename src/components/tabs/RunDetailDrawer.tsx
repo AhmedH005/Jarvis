@@ -11,7 +11,7 @@ import {
 import type { BuilderExecutionHistoryEntry } from '@/adapters/builder-execution'
 import type { BuilderExecutionRequest } from '@/adapters/builder-execution-request'
 import { createBuilderRemediationRequest } from '@/adapters/builder-execution-request'
-import { verifyCheckerRun } from '@/adapters/checker'
+import { getBuilderProvider } from '@/integrations/registry/providerRegistry'
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -223,8 +223,11 @@ export function RunDetailDrawer({
     setVerifyPhase('running')
     setVerifyNote('')
     try {
-      const result = await verifyCheckerRun(entry.runId)
-      setVerifyNote(result.note)
+      const result = await getBuilderProvider().verifyRun(entry.runId)
+      if (!result.ok || !result.data) {
+        throw new Error(result.failure?.message ?? result.summary)
+      }
+      setVerifyNote(result.data.note)
       setVerifyPhase('done')
       await onHistoryRefresh?.()
     } catch (error) {

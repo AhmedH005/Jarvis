@@ -42,6 +42,11 @@ import type {
   GmailSendResult,
   GmailStatus,
 } from '../src/shared/gmail-bridge'
+import type {
+  GCalStatusResult,
+  GCalListEventsResult,
+} from '../src/shared/gcal-bridge'
+import type { RuntimeDiagnostics } from '../src/shared/runtime-bridge'
 
 type LegacyTtsSpeakResult =
   | ArrayBuffer
@@ -203,6 +208,16 @@ const jarvisAPI = {
       ipcRenderer.on('llm:stream', handler)
       return () => ipcRenderer.removeListener('llm:stream', handler)
     },
+
+    /**
+     * Non-streaming command classification using Claude Haiku.
+     * Used by the model-assisted router (model-router.ts).
+     * Returns { ok: true, text } with raw JSON, or { ok: false, error, code }.
+     */
+    classify: (
+      command: string
+    ): Promise<{ ok: true; text: string } | { ok: false; error: string; code: string }> =>
+      ipcRenderer.invoke('llm:classify', { command }),
   },
 
   // ── Planner bridge ────────────────────────────────────────────────────────────
@@ -312,6 +327,32 @@ const jarvisAPI = {
       ipcRenderer.invoke('gmail:sendMessage', input),
     status: (): Promise<GmailStatus> =>
       ipcRenderer.invoke('gmail:status'),
+  },
+
+  // ── Google Calendar ───────────────────────────────────────────────────────────
+  gcal: {
+    status: (): Promise<GCalStatusResult> =>
+      ipcRenderer.invoke('gcal:status'),
+    listEvents: (
+      params?: { timeMin?: string; timeMax?: string; maxResults?: number }
+    ): Promise<GCalListEventsResult> =>
+      ipcRenderer.invoke('gcal:listEvents', params),
+  },
+
+  // ── ICS / CalDAV ──────────────────────────────────────────────────────────────
+  ics: {
+    /** Fetch and return raw ICS text from a remote URL. */
+    fetchUrl: (url: string): Promise<{ ok: true; text: string } | { ok: false; error: string }> =>
+      ipcRenderer.invoke('ics:fetchUrl', url),
+
+    /** Return the ICS/CalDAV env config (reads process.env in main). */
+    getConfig: (): Promise<{ icsUrl?: string; caldavUrl?: string }> =>
+      ipcRenderer.invoke('ics:getConfig'),
+  },
+
+  runtime: {
+    getDiagnostics: (): Promise<RuntimeDiagnostics> =>
+      ipcRenderer.invoke('runtime:getDiagnostics'),
   },
 }
 

@@ -1,9 +1,9 @@
 import { create } from 'zustand'
 import {
   BUILDER_PLAN_SCOPE,
-  requestBuilderPlan,
   type BuilderPlanResult,
 } from '@/adapters/builder-plan'
+import { getBuilderProvider } from '@/integrations/registry/providerRegistry'
 
 type BuilderPlanPhase = 'idle' | 'loading' | 'ready' | 'error'
 
@@ -32,15 +32,19 @@ export const useBuilderPlanStore = create<BuilderPlanState>((set, get) => ({
     set({ phase: 'loading', error: null })
 
     try {
-      const result = await requestBuilderPlan({
+      const result = await getBuilderProvider().requestPlan({
         taskPrompt: prompt,
         scope: BUILDER_PLAN_SCOPE,
         mode: 'plan-only',
       })
 
+      if (!result.ok) {
+        throw new Error(result.failure?.message ?? result.summary)
+      }
+
       set({
         phase: 'ready',
-        result,
+        result: result.data,
         error: null,
       })
     } catch (error) {

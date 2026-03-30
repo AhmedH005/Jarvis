@@ -10,6 +10,7 @@ import { TelegramPlannerBridge } from '@/components/telegram/TelegramPlannerBrid
 import { IdleScreen } from '@/screens/IdleScreen'
 import { getReactorDisplayStatus } from '@/lib/reactor-display'
 import { useJarvisGreeting } from '@/hooks/useJarvisGreeting'
+import { useRuntimeStore } from '@/store/runtime'
 
 export default function App() {
   const setOcStatus = useJarvisStore((s) => s.setOcStatus)
@@ -18,6 +19,10 @@ export default function App() {
   const ocStatus = useJarvisStore((s) => s.ocStatus)
   const statusChecked = useJarvisStore((s) => s.statusChecked)
   const reactorVisualLive = useJarvisStore((s) => s.reactorVisualLive)
+  const runtimeSnapshot = useRuntimeStore((s) => s.snapshot)
+  const runtimePhase = useRuntimeStore((s) => s.phase)
+  const runtimeError = useRuntimeStore((s) => s.error)
+  const refreshRuntime = useRuntimeStore((s) => s.refresh)
 
   const mode = useUIState((s) => s.mode)
   const setMode = useUIState((s) => s.setMode)
@@ -42,25 +47,28 @@ export default function App() {
     }
   }, [mode, setMode, setReactorVisualLive])
 
-  // Gateway status polling
+  // Runtime/provider status polling
   useEffect(() => {
     if (mode !== 'activating' && mode !== 'active') return
 
-    const check = async () => {
-      if (!window.jarvis) {
-        setOcStatus({ online: false, error: 'No bridge' })
-        return
+    void refreshRuntime()
+    const id = setInterval(() => { void refreshRuntime() }, 20_000)
+    return () => clearInterval(id)
+  }, [mode, refreshRuntime])
+
+  useEffect(() => {
+    const status = runtimeSnapshot?.diagnostics?.openclaw
+    if (!status) {
+      if (runtimePhase === 'error') {
+        setOcStatus({ online: false, error: runtimeError ?? 'Runtime diagnostics unavailable' })
       }
-      const status = await window.jarvis.openclaw.status()
-      setOcStatus(status)
-      if (status.online) pushLog(`Gateway online · ${status.model ?? 'connected'}`, 'success')
-      else pushLog(`Gateway unreachable: ${status.error}`, 'error')
+      return
     }
 
-    check()
-    const id = setInterval(check, 20_000)
-    return () => clearInterval(id)
-  }, [mode, pushLog, setOcStatus])
+    setOcStatus(status)
+    if (status.online) pushLog(`Gateway online · ${status.model ?? 'connected'}`, 'success')
+    else pushLog(`Gateway unreachable: ${status.error}`, 'error')
+  }, [pushLog, runtimeError, runtimePhase, runtimeSnapshot, setOcStatus])
 
   // Derive the screen key for AnimatePresence
   // Keep IdleScreen mounted during 'activating' so the full activation animation plays there

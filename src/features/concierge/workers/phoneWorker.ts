@@ -32,7 +32,7 @@ function failLinkedBookingFromCallStart(
   status: 'failed' | 'needs_follow_up' = 'failed',
 ): void {
   if (!req.linkedBookingRequestId) return
-  applyBookingExecutionResult(req.linkedBookingRequestId, {
+  void applyBookingExecutionResult(req.linkedBookingRequestId, {
     id: `booking-result-${req.id}`,
     bookingRequestId: req.linkedBookingRequestId,
     status,
@@ -483,7 +483,7 @@ async function finalizeLinkedBookingCall(reqId: string, update: PhoneCallUpdate)
     transcript: update.transcription ?? req.transcript,
   })
 
-  applyBookingExecutionResult(req.linkedBookingRequestId, {
+  await applyBookingExecutionResult(req.linkedBookingRequestId, {
     id: `booking-result-${reqId}`,
     bookingRequestId: req.linkedBookingRequestId,
     status: outcome.status,

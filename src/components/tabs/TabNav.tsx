@@ -2,15 +2,16 @@ import type { FC } from 'react'
 import { motion } from 'framer-motion'
 import {
   Bot,
-  CalendarDays,
-  CheckSquare,
   Command,
+  Coins,
   Code2,
-  LayoutDashboard,
-  MessageSquare,
-  Music,
+  Database,
+  HardDrive,
+  Mail,
+  Mic2,
+  Shield,
   Sparkles,
-  Zap,
+  TimerReset,
 } from 'lucide-react'
 import type { TabId } from '@/adapters/backend-files'
 
@@ -20,14 +21,14 @@ interface TabNavProps {
 }
 
 const NAV_ITEMS: { id: TabId; label: string; icon: FC<{ className?: string }>; description: string }[] = [
-  { id: 'chat',        label: 'Chat',        icon: MessageSquare,   description: 'Talk to JARVIS'        },
-  { id: 'tasks',       label: 'Tasks',       icon: CheckSquare,     description: 'Manage your work'      },
-  { id: 'calendar',    label: 'Calendar',    icon: CalendarDays,    description: 'Schedule & events'     },
-  { id: 'automations', label: 'Automations', icon: Zap,             description: 'Cron jobs & triggers'  },
-  { id: 'dashboard',   label: 'Dashboard',   icon: LayoutDashboard, description: 'Life overview'         },
-  { id: 'concierge',   label: 'Concierge',   icon: Sparkles,        description: 'Proactive assistant'   },
-  { id: 'coding',      label: 'Coding Team', icon: Code2,           description: 'Dev agents & projects' },
-  { id: 'music',       label: 'Music Studio', icon: Music,          description: 'AI band & generation'  },
+  { id: 'command',   label: 'Command',   icon: Command,   description: 'Route natural language' },
+  { id: 'time',      label: 'Time',      icon: TimerReset, description: 'Schedule + tasks + automations' },
+  { id: 'concierge', label: 'Concierge', icon: Mail,      description: 'Email, bookings, admin' },
+  { id: 'creation',  label: 'Creation',  icon: Mic2,      description: 'Voice and media ops' },
+  { id: 'dev',       label: 'Dev',       icon: Code2,     description: 'Builder-backed execution' },
+  { id: 'memory',    label: 'Memory',    icon: Database,  description: 'Grounded recall' },
+  { id: 'finance',   label: 'Finance',   icon: Coins,     description: 'Real finance or unavailable' },
+  { id: 'system',    label: 'System',    icon: Shield,    description: 'Runtime, approvals, receipts' },
 ]
 
 export function TabNav({ activeTab, onTabChange }: TabNavProps) {

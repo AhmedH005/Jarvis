@@ -18,13 +18,12 @@ try {
     if (key && !(key in process.env)) process.env[key] = val
   }
 } catch { /* .env absent — rely on shell environment */ }
-console.log('[Main] ANTHROPIC_API_KEY loaded:', !!process.env['ANTHROPIC_API_KEY'])
-console.log('[Main] ELEVENLABS_API_KEY loaded:', !!process.env['ELEVENLABS_API_KEY'])
 import { OpenClawBridge } from './openclaw'
 import type { StreamEvent } from './openclaw'
 import { TelegramBridge } from './telegram'
 import { initPhoneBridge } from './phone'
-import { registerGmailIpcHandlers } from './gmail'
+import { registerGmailIpcHandlers, getGmailStatus } from './gmail'
+import { registerGCalIpcHandlers } from './gcal'
 import {
   JARVIS_PLANNER_BRIDGE_OFFLINE_MESSAGE,
   type PlannerApplyPlanningActionsPayload,
@@ -41,6 +40,8 @@ import {
   handleBuilderStartExecution,
   handleCheckerVerifyRun,
 } from './builder-bridge'
+import type { RuntimeDiagnostics } from '../src/shared/runtime-bridge'
+import { getSecuritySnapshot, readSecret, resolveSafePath } from './security'
 
 let mainWindow: BrowserWindow | null = null
 let bridge: OpenClawBridge | null = null
@@ -92,14 +93,15 @@ app.whenReady().then(() => {
 
   registerIpcHandlers(bridge)
   registerGmailIpcHandlers()
+  registerGCalIpcHandlers()
   createWindow()
 
   // Phone bridge — init after createWindow so mainWindow is set
   if (mainWindow) void initPhoneBridge(mainWindow)
 
-  const telegramToken = process.env['TELEGRAM_BOT_TOKEN']?.trim()
+  const telegramToken = readSecret('TELEGRAM_BOT_TOKEN')?.trim()
   if (telegramToken) {
-    telegramBridge = new TelegramBridge(telegramToken, process.env['TELEGRAM_ALLOWED_CHAT_ID'])
+    telegramBridge = new TelegramBridge(telegramToken, readSecret('TELEGRAM_ALLOWED_CHAT_ID'))
     telegramBridge.setMessageHandler((message) => {
       if (!mainWindow || mainWindow.isDestroyed()) return
       mainWindow.webContents.send('telegram:message', message)
@@ -205,10 +207,73 @@ function registerIpcHandlers(b: OpenClawBridge): void {
   // Shell: safe external URL open
   ipcMain.handle('shell:open', (_event, url: string) => shell.openExternal(url))
 
+  ipcMain.handle('runtime:getDiagnostics', async (): Promise<RuntimeDiagnostics> => {
+    const openclaw = await b.getStatus().catch((error: unknown) => ({
+      online: false,
+      error: error instanceof Error ? error.message : String(error),
+    }))
+
+    // readSecret() returns '' when NO_SECRETS_MODE=true (blocks access regardless of env).
+    // process.env checks are used separately to distinguish "key absent" vs "key blocked by mode".
+    const llmMissing = readSecret('ANTHROPIC_API_KEY') ? [] : ['ANTHROPIC_API_KEY']
+    const elevenLabsMissing = readSecret('ELEVENLABS_API_KEY') ? [] : ['ELEVENLABS_API_KEY']
+    const telegramMissing = readSecret('TELEGRAM_BOT_TOKEN') ? [] : ['TELEGRAM_BOT_TOKEN']
+
+    // Direct env presence checks — independent of NO_SECRETS_MODE
+    const llmKeyPresent = Boolean(process.env['ANTHROPIC_API_KEY']?.trim())
+    const elevenLabsKeyPresent = Boolean(process.env['ELEVENLABS_API_KEY']?.trim())
+    const telegramKeyPresent = Boolean(process.env['TELEGRAM_BOT_TOKEN']?.trim())
+
+    return {
+      checkedAt: new Date().toISOString(),
+      safety: getSecuritySnapshot(),
+      openclaw,
+      gmail: getGmailStatus(),
+      phone: {
+        port: 0,
+        publicBaseUrl: null,
+        running: false,
+        credentialsConfigured: false,
+        twilioNumber: null,
+      },
+      llm: {
+        provider: 'anthropic',
+        configured: llmMissing.length === 0,
+        keyPresentInEnv: llmKeyPresent,
+        missing: llmMissing,
+      },
+      speech: {
+        provider: 'elevenlabs',
+        configured: elevenLabsMissing.length === 0,
+        keyPresentInEnv: elevenLabsKeyPresent,
+        missing: elevenLabsKeyPresent && elevenLabsMissing.length > 0
+          ? ['ELEVENLABS_API_KEY (present in env but blocked by NO_SECRETS_MODE)']
+          : elevenLabsMissing,
+        voiceIdConfigured: Boolean(readSecret('ELEVENLABS_VOICE_ID')),
+      },
+      media: {
+        provider: 'elevenlabs',
+        configured: elevenLabsMissing.length === 0,
+        keyPresentInEnv: elevenLabsKeyPresent,
+        missing: elevenLabsKeyPresent && elevenLabsMissing.length > 0
+          ? ['ELEVENLABS_API_KEY (present in env but blocked by NO_SECRETS_MODE)']
+          : elevenLabsMissing,
+      },
+      telegram: {
+        provider: 'telegram-bot',
+        configured: telegramMissing.length === 0,
+        keyPresentInEnv: telegramKeyPresent,
+        missing: telegramMissing,
+        restrictedToChatId: Boolean(readSecret('TELEGRAM_ALLOWED_CHAT_ID')?.trim()),
+      },
+    }
+  })
+
   // FS: read backend markdown files (read-only, local paths only)
   ipcMain.handle('fs:readFile', async (_event, filePath: string) => {
     try {
-      return { ok: true, content: await readFile(filePath, 'utf-8') }
+      const safePath = resolveSafePath(filePath)
+      return { ok: true, content: await readFile(safePath, 'utf-8') }
     } catch (err) {
       return { ok: false, content: '', error: String(err) }
     }
@@ -352,7 +417,7 @@ function registerIpcHandlers(b: OpenClawBridge): void {
         if (!event.sender.isDestroyed()) event.sender.send('llm:stream', e)
       }
 
-      const apiKey = process.env['ANTHROPIC_API_KEY']
+      const apiKey = readSecret('ANTHROPIC_API_KEY')
       if (!apiKey) {
         send({ type: 'error', payload: 'ANTHROPIC_API_KEY not set' })
         return
@@ -417,9 +482,93 @@ function registerIpcHandlers(b: OpenClawBridge): void {
     }
   )
 
+  // ── LLM: non-streaming command classification (for model-assisted router) ─────
+  // Returns { ok: true, text: string } with raw JSON from Claude,
+  // or { ok: false, error: string, code: string } on failure.
+  // Uses claude-haiku-4-5-20251001 for fast, cheap single-shot classification.
+  ipcMain.handle('llm:classify', async (_event, { command }: { command: string }) => {
+    const apiKey = readSecret('ANTHROPIC_API_KEY')
+    if (!apiKey) {
+      return { ok: false, error: 'ANTHROPIC_API_KEY not set', code: 'credentials_missing' }
+    }
+
+    const systemPrompt = [
+      'You are a command router for JARVIS, a personal AI assistant.',
+      'Classify the user command into exactly one domain and return ONLY a JSON object — no prose, no explanation, no markdown.',
+      '',
+      'Domains:',
+      '- "command": general assistant questions, system/runtime queries, unclear intent',
+      '- "time": schedule, calendar, event, meeting, task, reminder, deadline, automation, recurring job',
+      '- "concierge": email, mail, send, reply, booking, reservation, follow-up, personal admin, inbox',
+      '- "creation": voice, TTS, audio, music, transcription, media generation, sound',
+      '- "dev": code, build, implement, fix, refactor, debug, repository, programming, test',
+      '- "memory": remember, recall, note, context, brainrepo, store, save, record',
+      '- "finance": budget, money, expense, account, transaction, spending',
+      '- "unknown": truly ambiguous — cannot determine from context',
+      '',
+      'Return this exact JSON schema (nothing else):',
+      '{',
+      '  "domain": "<one of the domains above>",',
+      '  "intent": "<10 words max — what the user wants>",',
+      '  "confidence": "high" | "medium" | "low",',
+      '  "requires_approval": true | false,',
+      '  "suggested_action": "stage" | "approve_and_stage" | "clarify" | "unavailable",',
+      '  "entities": {',
+      '    "dates": ["<date string>"],',
+      '    "contacts": ["<name or @mention>"],',
+      '    "keywords": ["<key term>"]',
+      '  }',
+      '}',
+    ].join('\n')
+
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 256,
+          stream: false,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: command }],
+        }),
+        signal: AbortSignal.timeout(8000),
+      })
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => res.statusText)
+        const code = res.status === 401 ? 'credentials_invalid'
+          : res.status === 429 ? 'rate_limited'
+          : 'api_error'
+        return { ok: false, error: `Claude API ${res.status}: ${errText}`, code }
+      }
+
+      const data = await res.json().catch(() => null)
+      const text: string = (data as { content?: Array<{ type: string; text?: string }> } | null)?.content?.[0]?.text ?? ''
+
+      if (!text) {
+        return { ok: false, error: 'Empty response from classification model', code: 'empty_response' }
+      }
+
+      return { ok: true, text }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      const isTimeout = message.includes('TimeoutError') || message.includes('timed out')
+      return {
+        ok: false,
+        error: message,
+        code: isTimeout ? 'timeout' : 'transport_error',
+      }
+    }
+  })
+
   // ── Music generation: ElevenLabs Sound Generation ────────────────────────────
   ipcMain.handle('music:generate', async (_event, { prompt }: { prompt: string }) => {
-    const apiKey = process.env['ELEVENLABS_API_KEY']
+    const apiKey = readSecret('ELEVENLABS_API_KEY')
     if (!apiKey) {
       console.warn('[Music] ELEVENLABS_API_KEY not set — music generation unavailable')
       return { ok: false, error: 'ELEVENLABS_API_KEY not set' }
@@ -454,12 +603,12 @@ function registerIpcHandlers(b: OpenClawBridge): void {
   // ── TTS: generate speech via ElevenLabs ──────────────────────────────────────
   ipcMain.handle('tts:speak', async (_event, { text }: { text: string }) => {
     console.log('[TTS] ElevenLabs handler called', { textLength: text.length })
-    const apiKey = process.env['ELEVENLABS_API_KEY']
+    const apiKey = readSecret('ELEVENLABS_API_KEY')
     if (!apiKey) {
       console.warn('[TTS] ELEVENLABS_API_KEY not set')
       return { ok: false, error: 'ELEVENLABS_API_KEY not set' }
     }
-    const voiceId = process.env['ELEVENLABS_VOICE_ID'] ?? 'pNInz6obpgDQGcFmaJgB'
+    const voiceId = readSecret('ELEVENLABS_VOICE_ID') || 'pNInz6obpgDQGcFmaJgB'
     try {
       const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
         method: 'POST',

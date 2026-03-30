@@ -65,13 +65,12 @@ function AddEventModal({
   const [notes, setNotes] = useState('')
   const [error, setError] = useState('')
 
-  function handleSubmit() {
+  async function handleSubmit() {
     if (!title.trim()) { setError('Title is required'); return }
-    const [h, m] = startTime.split(':').map(Number)
     const startDt = new Date(`${date}T${startTime}:00`)
     const endDt = new Date(startDt.getTime() + duration * 60 * 1000)
 
-    const result = createEvent({
+    const result = await createEvent({
       title: title.trim(),
       start: startDt.toISOString().replace(/\.\d{3}Z$/, ''),
       end: endDt.toISOString().replace(/\.\d{3}Z$/, ''),
@@ -116,7 +115,7 @@ function AddEventModal({
             autoFocus
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
+            onKeyDown={(e) => e.key === 'Enter' && void handleSubmit()}
             placeholder="Event title"
             className="modal-input"
           />
@@ -171,7 +170,7 @@ function AddEventModal({
         </ModalField>
 
         <button
-          onClick={handleSubmit}
+          onClick={() => void handleSubmit()}
           className="py-2 rounded text-[10px] font-mono tracking-[0.12em] transition-all"
           style={{
             background: 'rgba(0,212,255,0.15)',
@@ -213,21 +212,21 @@ function EventInspector({
   const [notes, setNotes] = useState(event.notes ?? '')
   const [error, setError] = useState('')
 
-  function handleSave() {
-    const result = updateEvent(event.id, { title, notes: notes || undefined })
+  async function handleSave() {
+    const result = await updateEvent(event.id, { title, notes: notes || undefined })
     if (!result.success) { setError(result.error); return }
     setEditing(false)
     onClose()
   }
 
-  function handleDelete() {
-    const result = deleteEvent(event.id)
+  async function handleDelete() {
+    const result = await deleteEvent(event.id)
     if (!result.success) { setError(result.error); return }
     onDeleted()
   }
 
-  function handleToggleLock() {
-    updateEvent(event.id, { locked: !event.locked })
+  async function handleToggleLock() {
+    await updateEvent(event.id, { locked: !event.locked })
     onClose()
   }
 
@@ -309,17 +308,17 @@ function EventInspector({
         <div className="flex items-center gap-2 pt-1">
           {editing ? (
             <>
-              <ActionButton onClick={handleSave} accent="green">SAVE</ActionButton>
+              <ActionButton onClick={() => void handleSave()} accent="green">SAVE</ActionButton>
               <ActionButton onClick={() => setEditing(false)} accent="dim">CANCEL</ActionButton>
             </>
           ) : (
             <>
               <ActionButton onClick={() => setEditing(true)} accent="blue">EDIT</ActionButton>
-              <ActionButton onClick={handleToggleLock} accent="dim">
+              <ActionButton onClick={() => void handleToggleLock()} accent="dim">
                 {event.locked ? <><Unlock className="w-3 h-3 inline mr-1" />UNLOCK</> : <><Lock className="w-3 h-3 inline mr-1" />LOCK</>}
               </ActionButton>
               <ActionButton
-                onClick={handleDelete}
+                onClick={() => void handleDelete()}
                 accent="red"
                 disabled={!!event.locked}
                 title={event.locked ? 'Unlock first' : undefined}
@@ -398,7 +397,7 @@ export function CalendarTab() {
     const rbcEv = event as RBCEvent
     const newStart = start instanceof Date ? start : new Date(start)
     const newEnd   = end   instanceof Date ? end   : new Date(end)
-    moveEvent(
+    void moveEvent(
       rbcEv.id,
       newStart.toISOString().replace(/\.\d{3}Z$/, ''),
       newEnd.toISOString().replace(/\.\d{3}Z$/, '')
@@ -409,7 +408,7 @@ export function CalendarTab() {
     const rbcEv = event as RBCEvent
     const newStart = start instanceof Date ? start : new Date(start)
     const newEnd   = end   instanceof Date ? end   : new Date(end)
-    moveEvent(
+    void moveEvent(
       rbcEv.id,
       newStart.toISOString().replace(/\.\d{3}Z$/, ''),
       newEnd.toISOString().replace(/\.\d{3}Z$/, '')

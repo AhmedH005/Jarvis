@@ -13,5 +13,16 @@
       "@electron/*": ["./electron/*"]
     }
   },
-  "include": ["electron/**/*", "src/shared/builder-bridge.ts", "src/shared/planner-bridge.ts", "src/shared/phone-bridge.ts", "src/shared/gmail-bridge.ts", "electron.vite.config.ts"]
+  "include": [
+    "electron/**/*",
+    "src/shared/builder-bridge.ts",
+    "src/shared/planner-bridge.ts",
+    "src/shared/phone-bridge.ts",
+    "src/shared/gmail-bridge.ts",
+    "src/shared/gcal-bridge.ts",
+    "src/shared/operational-safety.ts",
+    "src/shared/runtime-bridge.ts",
+    "src/types/index.ts",
+    "electron.vite.config.ts"
+  ]
 }

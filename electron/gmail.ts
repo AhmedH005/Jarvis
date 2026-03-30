@@ -49,7 +49,7 @@ function gmailConfig(): GmailConfig {
   }
 }
 
-function gmailStatus(): GmailStatus {
+export function getGmailStatus(): GmailStatus {
   const cfg = gmailConfig()
   const missing = [
     !cfg.clientId ? 'GMAIL_CLIENT_ID' : '',
@@ -66,7 +66,7 @@ function gmailStatus(): GmailStatus {
 
 async function getAccessToken(): Promise<string> {
   const cfg = gmailConfig()
-  const status = gmailStatus()
+  const status = getGmailStatus()
   if (!status.configured) {
     throw new Error(`Gmail auth missing: ${status.missing.join(', ')}`)
   }
@@ -153,7 +153,7 @@ function toBase64Url(value: string): string {
 }
 
 export function registerGmailIpcHandlers(): void {
-  ipcMain.handle('gmail:status', (): GmailStatus => gmailStatus())
+  ipcMain.handle('gmail:status', (): GmailStatus => getGmailStatus())
 
   ipcMain.handle('gmail:fetchRecent', async (): Promise<GmailFetchResult> => {
     try {

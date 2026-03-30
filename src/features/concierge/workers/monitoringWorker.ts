@@ -85,15 +85,11 @@ export function checkAllWatches(): void {
 
   if (activeWatches.length === 0) return
 
-  store.setWorkerStatus('monitoring', 'running')
+  store.setWorkerStatus('monitoring', 'error')
   store.logActivity(
     'monitoring',
-    `Checking ${activeWatches.length} active watch${activeWatches.length !== 1 ? 'es' : ''}`,
-    'info',
+    `Monitoring unavailable for ${activeWatches.length} watch${activeWatches.length !== 1 ? 'es' : ''}`,
+    'failed',
+    'No real monitoring provider is configured yet, so Jarvis cannot truthfully check these watches.',
   )
-
-  // Stub: real implementation calls Electron IPC
-  // window.electronAPI?.monitoring?.checkWatches(activeWatches.map(w => w.id))
-
-  store.setWorkerStatus('monitoring', 'idle')
 }

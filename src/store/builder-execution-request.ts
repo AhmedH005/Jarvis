@@ -1,11 +1,10 @@
 import { create } from 'zustand'
 import {
-  createBuilderExecutionRequest,
-  settleBuilderExecutionRequest,
   type BuilderExecutionDecisionAction,
   type BuilderExecutionRequest,
 } from '@/adapters/builder-execution-request'
 import type { BuilderPlanResult } from '@/adapters/builder-plan'
+import { getBuilderProvider } from '@/integrations/registry/providerRegistry'
 
 type BuilderExecutionRequestPhase = 'idle' | 'loading' | 'ready' | 'error'
 type BatchApprovePhase = 'idle' | 'running' | 'done' | 'error'
@@ -48,11 +47,14 @@ export const useBuilderExecutionRequestStore = create<BuilderExecutionRequestSta
     set({ phase: 'loading', pendingAction: 'create', error: null })
 
     try {
-      const request = await createBuilderExecutionRequest(plan)
+      const result = await getBuilderProvider().createExecutionRequest(plan)
+      if (!result.ok) {
+        throw new Error(result.failure?.message ?? result.summary)
+      }
       set({
         phase: 'ready',
         pendingAction: null,
-        request,
+        request: result.data,
         error: null,
       })
     } catch (error) {
@@ -82,11 +84,14 @@ export const useBuilderExecutionRequestStore = create<BuilderExecutionRequestSta
     set({ phase: 'loading', pendingAction: action, error: null })
 
     try {
-      const settledRequest = await settleBuilderExecutionRequest(request, action, reason)
+      const result = await getBuilderProvider().settleExecutionRequest(request, action, reason)
+      if (!result.ok) {
+        throw new Error(result.failure?.message ?? result.summary)
+      }
       set({
         phase: 'ready',
         pendingAction: null,
-        request: settledRequest,
+        request: result.data,
         error: null,
       })
     } catch (error) {
@@ -117,7 +122,9 @@ export const useBuilderExecutionRequestStore = create<BuilderExecutionRequestSta
 
     for (const candidate of candidates) {
       try {
-        const settled = await settleBuilderExecutionRequest(candidate, 'approve')
+        const result = await getBuilderProvider().settleExecutionRequest(candidate, 'approve')
+        if (!result.ok || !result.data) continue
+        const settled = result.data
         approved++
         if (candidate.id === updatedRequest?.id) {
           updatedRequest = settled

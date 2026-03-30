@@ -15,10 +15,10 @@ import {
   Users,
 } from 'lucide-react'
 import {
-  loadBuilderExecutionHistory,
   type BuilderExecutionHistoryEntry,
   type BuilderExecutionHistorySnapshot,
 } from '@/adapters/builder-execution'
+import { getBuilderProvider } from '@/integrations/registry/providerRegistry'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -95,11 +95,23 @@ function deriveTeamStatus(
 
 export function CodingTeamTab() {
   const [history, setHistory] = useState<BuilderExecutionHistorySnapshot | null>(null)
+  const [historyNote, setHistoryNote] = useState<string | null>(null)
   const [expandedRun, setExpandedRun] = useState<string | null>(null)
 
   useEffect(() => {
-    void loadBuilderExecutionHistory().then(setHistory)
-    const id = setInterval(() => void loadBuilderExecutionHistory().then(setHistory), 15_000)
+    const refreshHistory = async () => {
+      const result = await getBuilderProvider().loadHistory()
+      if (!result.ok) {
+        setHistory(null)
+        setHistoryNote(result.summary)
+        return
+      }
+      setHistory(result.data ?? null)
+      setHistoryNote(null)
+    }
+
+    void refreshHistory()
+    const id = setInterval(() => void refreshHistory(), 15_000)
     return () => clearInterval(id)
   }, [])
 
@@ -178,10 +190,19 @@ export function CodingTeamTab() {
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-3 space-y-2">
-          {!history && (
+          {!history && !historyNote && (
             <div className="flex items-center justify-center py-8 gap-2">
               <Loader2 className="w-4 h-4 animate-spin" style={{ color: 'rgba(0,212,255,0.4)' }} />
               <span className="text-[10px] font-mono" style={{ color: 'rgba(74,122,138,0.5)' }}>Loading runs…</span>
+            </div>
+          )}
+
+          {!history && historyNote && (
+            <div className="flex flex-col items-center justify-center py-12 gap-3">
+              <AlertTriangle className="w-8 h-8" style={{ color: 'rgba(255,200,74,0.55)' }} />
+              <p className="text-[11px] font-mono text-center" style={{ color: 'rgba(192,232,240,0.52)' }}>
+                {historyNote}
+              </p>
             </div>
           )}
 

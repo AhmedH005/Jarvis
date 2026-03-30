@@ -3,6 +3,8 @@ import type { AgentPersonaId } from '@/adapters/agent-control'
 import { AGENT_FOCUS_OPTIONS } from '@/adapters/agent-control'
 import type { BuilderWorkTarget } from '@/shared/builder-bridge'
 import { buildBuilderRepoTarget } from '@/shared/builder-bridge'
+import { getOrchestratorProvider } from '@/integrations/registry/providerRegistry'
+import type { RouteConfidence } from '@/integrations/contracts/providers'
 import { useMissionHandoffStore } from './mission-handoff'
 
 // ── Action modes correspond to real existing pipeline phases ──────────────────
@@ -14,10 +16,17 @@ export type MissionActionMode =
   | 'remediation'             // Kai: create a remediation request from a failed run
   | 'ops-check'               // Noah: surface system/runtime health
   | 'research'                // Researcher: gather context, compare approaches
+  | 'concierge-workflow'
+  | 'calendar-write'
+  | 'memory-retrieval'
+  | 'media-generation'
 
-export type MissionConfidence = 'high' | 'medium' | 'low'
+export type MissionConfidence = RouteConfidence
 
 export interface MissionRoute {
+  domain: 'direct' | 'concierge' | 'builder' | 'calendar' | 'memory' | 'media' | 'system' | 'research'
+  providerInterface: string
+  providerKey: string
   agentId: AgentPersonaId
   agentName: string
   actionMode: MissionActionMode
@@ -29,6 +38,8 @@ export interface MissionRoute {
   confidence: MissionConfidence
   ambiguous: boolean
   fallbackNote: string | null
+  executionState: 'suggested' | 'unavailable'
+  unavailableReason?: string | null
 }
 
 export type MissionPhase = 'idle' | 'parsed' | 'handed-off'
@@ -183,147 +194,24 @@ export function detectMultiMissions(text: string): string[] | null {
 }
 
 function deriveRoute(input: string): MissionRoute {
-  const text = input.trim()
-
-  const executeScore    = countSignals(text, BUILDER_EXECUTE_SIGNALS)
-  const planScore       = countSignals(text, PLAN_SIGNALS)
-  const verifyScore     = countSignals(text, VERIFY_SIGNALS)
-  const remediateScore  = countSignals(text, REMEDIATION_SIGNALS)
-  const opsScore        = countSignals(text, OPS_SIGNALS)
-  const researchScore   = countSignals(text, RESEARCH_SIGNALS)
-
-  const scores = [
-    { mode: 'execution-request' as const, score: executeScore },
-    { mode: 'plan-only'         as const, score: planScore },
-    { mode: 'verification'      as const, score: verifyScore },
-    { mode: 'remediation'       as const, score: remediateScore },
-    { mode: 'ops-check'         as const, score: opsScore },
-    { mode: 'research'          as const, score: researchScore },
-  ]
-
-  const topScore   = Math.max(...scores.map((s) => s.score))
-  const topMatches = scores.filter((s) => s.score === topScore && s.score > 0)
-  const ambiguous  = topMatches.length > 1 || topScore === 0
-
-  const focus = inferFocusTarget(text)
-
-  // ── Zero signal: complete ambiguity ─────────────────────────────────────────
-  if (topScore === 0) {
-    return {
-      agentId:     'alex',
-      agentName:   'Alex',
-      actionMode:  'plan-only',
-      actionLabel: 'Plan first',
-      targetHint:  focus.targetHint,
-      targetId:    focus.targetId,
-      focusTarget: focus.focusTarget,
-      rationale:   'No clear intent signals detected. Defaulting to a plan-first pass with Alex to scope the work before any execution.',
-      confidence:  'low',
-      ambiguous:   true,
-      fallbackNote: 'Refine the mission to mention what you want to fix, build, verify, or review.',
-    }
-  }
-
-  const winningMode = topMatches[0].mode
-
-  // ── Remediation path ────────────────────────────────────────────────────────
-  if (winningMode === 'remediation') {
-    return {
-      agentId:     'kai',
-      agentName:   'Kai',
-      actionMode:  'remediation',
-      actionLabel: 'Create remediation request',
-      targetHint:  focus.targetHint,
-      targetId:    focus.targetId,
-      focusTarget: focus.focusTarget,
-      rationale:   'Remediation or retry signals detected. Kai can package a remediation request against the failed run through the real Builder pipeline.',
-      confidence:  ambiguous ? 'medium' : 'high',
-      ambiguous,
-      fallbackNote: ambiguous ? 'Confirm which failed run to target before handing off.' : null,
-    }
-  }
-
-  // ── Verification path ────────────────────────────────────────────────────────
-  if (winningMode === 'verification') {
-    return {
-      agentId:     'maya',
-      agentName:   'Maya',
-      actionMode:  'verification',
-      actionLabel: 'Verify Builder run',
-      targetHint:  focus.targetHint,
-      targetId:    focus.targetId,
-      focusTarget: focus.focusTarget,
-      rationale:   'Review or verification signals detected. Maya can attach a verification decision to a finalized Builder run.',
-      confidence:  ambiguous ? 'medium' : 'high',
-      ambiguous,
-      fallbackNote: ambiguous ? 'Clarify whether this is a code review or a Builder-run verification.' : null,
-    }
-  }
-
-  // ── Ops-check path ────────────────────────────────────────────────────────────
-  if (winningMode === 'ops-check') {
-    return {
-      agentId:     'noah',
-      agentName:   'Noah',
-      actionMode:  'ops-check',
-      actionLabel: 'Surface system health',
-      targetHint:  focus.targetHint,
-      targetId:    focus.targetId,
-      focusTarget: focus.focusTarget,
-      rationale:   'System, health, or ops signals detected. Noah can surface current runtime state and blockers from the shell.',
-      confidence:  ambiguous ? 'medium' : 'high',
-      ambiguous,
-      fallbackNote: ambiguous ? 'If this is a code change, refine to use build/fix language.' : null,
-    }
-  }
-
-  // ── Research path ─────────────────────────────────────────────────────────────
-  if (winningMode === 'research') {
-    return {
-      agentId:     'researcher',
-      agentName:   'Researcher',
-      actionMode:  'research',
-      actionLabel: 'Gather context',
-      targetHint:  focus.targetHint,
-      targetId:    focus.targetId,
-      focusTarget: focus.focusTarget,
-      rationale:   'Research or context-gathering signals detected. Researcher can surface relevant prior context and compare approaches before execution begins.',
-      confidence:  ambiguous ? 'medium' : 'high',
-      ambiguous,
-      fallbackNote: ambiguous ? 'Narrow the question or add more specific research direction.' : null,
-    }
-  }
-
-  // ── Plan-only path ────────────────────────────────────────────────────────────
-  if (winningMode === 'plan-only') {
-    return {
-      agentId:     'alex',
-      agentName:   'Alex',
-      actionMode:  'plan-only',
-      actionLabel: 'Generate plan',
-      targetHint:  focus.targetHint,
-      targetId:    focus.targetId,
-      focusTarget: focus.focusTarget,
-      rationale:   'Planning or scoping signals detected. Alex can turn this into a bounded plan with acceptance criteria before any execution request is created.',
-      confidence:  ambiguous ? 'medium' : 'high',
-      ambiguous,
-      fallbackNote: ambiguous ? 'If you are ready to execute, rephrase with build/implement language.' : null,
-    }
-  }
-
-  // ── Execution path (default builder work) ────────────────────────────────────
+  const route = getOrchestratorProvider().routeMission(input.trim())
   return {
-    agentId:     'kai',
-    agentName:   'Kai',
-    actionMode:  'execution-request',
-    actionLabel: 'Create execution request',
-    targetHint:  focus.targetHint,
-    targetId:    focus.targetId,
-    focusTarget: focus.focusTarget,
-    rationale:   'Build or implementation signals detected. Kai can package this into a Builder plan, then create an approval-gated execution request.',
-    confidence:  ambiguous ? 'medium' : 'high',
-    ambiguous,
-    fallbackNote: ambiguous ? 'Confirm scope or add a plan-first pass if target boundaries are unclear.' : null,
+    domain: route.domain,
+    providerInterface: route.providerInterface,
+    providerKey: route.providerKey,
+    agentId: route.agentId as AgentPersonaId,
+    agentName: route.agentName,
+    actionMode: route.actionMode as MissionActionMode,
+    actionLabel: route.actionLabel,
+    targetHint: route.targetHint,
+    targetId: route.targetId,
+    focusTarget: route.focusTarget,
+    rationale: route.rationale,
+    confidence: route.confidence,
+    ambiguous: route.ambiguous,
+    fallbackNote: route.fallbackNote,
+    executionState: route.executionState,
+    unavailableReason: route.unavailableReason,
   }
 }
 
@@ -353,6 +241,37 @@ export const useMissionIntakeStore = create<MissionIntakeState>((set, get) => ({
   confirmHandoff() {
     const { route, input } = get()
     if (!route) return
+    if (route.executionState === 'unavailable') {
+      set({
+        phase: 'parsed',
+        handoffNote: route.unavailableReason ?? 'This route is unavailable in the current runtime.',
+      })
+      return
+    }
+
+    getOrchestratorProvider().stageMission(
+      {
+        id: `route_${Date.now().toString(36)}`,
+        domain: route.domain,
+        providerInterface: route.providerInterface as any,
+        providerKey: route.providerKey,
+        agentId: route.agentId,
+        agentName: route.agentName,
+        actionMode: route.actionMode,
+        actionLabel: route.actionLabel,
+        targetHint: route.targetHint,
+        targetId: route.targetId,
+        focusTarget: route.focusTarget,
+        rationale: route.rationale,
+        confidence: route.confidence,
+        ambiguous: route.ambiguous,
+        requiresApproval: ['execution-request', 'remediation', 'concierge-workflow'].includes(route.actionMode),
+        executionState: route.executionState,
+        fallbackNote: route.fallbackNote,
+        unavailableReason: route.unavailableReason,
+      },
+      input.trim(),
+    )
 
     // Persist the full handoff payload and trigger agent-tab navigation
     useMissionHandoffStore.getState().setHandoff({

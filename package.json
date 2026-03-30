@@ -10,7 +10,8 @@
     "build": "electron-vite build",
     "preview": "env -u ELECTRON_RUN_AS_NODE electron-vite preview",
     "start": "env -u ELECTRON_RUN_AS_NODE electron .",
-    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "verify:core": "node scripts/verify-core.mjs"
   },
   "dependencies": {
     "clsx": "^2.1.0",

@@ -1,11 +1,10 @@
 import { create } from 'zustand'
 import {
-  finalizeBuilderExecution,
-  startBuilderExecution,
   type BuilderExecutionFinalizeDraft,
   type BuilderExecutionRun,
 } from '@/adapters/builder-execution'
 import type { BuilderExecutionRequest } from '@/adapters/builder-execution-request'
+import { getBuilderProvider } from '@/integrations/registry/providerRegistry'
 
 type BuilderExecutionPhase = 'idle' | 'loading' | 'ready' | 'error'
 type BatchStartPhase = 'idle' | 'running' | 'done' | 'error'
@@ -47,11 +46,14 @@ export const useBuilderExecutionStore = create<BuilderExecutionState>((set, get)
     set({ phase: 'loading', pendingAction: 'start', error: null })
 
     try {
-      const run = await startBuilderExecution(request)
+      const result = await getBuilderProvider().startExecution(request)
+      if (!result.ok) {
+        throw new Error(result.failure?.message ?? result.summary)
+      }
       set({
         phase: 'ready',
         pendingAction: null,
-        run,
+        run: result.data,
         error: null,
       })
     } catch (error) {
@@ -75,8 +77,9 @@ export const useBuilderExecutionStore = create<BuilderExecutionState>((set, get)
 
     for (const request of approved) {
       try {
-        const run = await startBuilderExecution(request)
-        lastRun = run
+        const result = await getBuilderProvider().startExecution(request)
+        if (!result.ok || !result.data) continue
+        lastRun = result.data
         started++
       } catch {
         // Skip failed starts — do not cascade-fail the batch
@@ -102,11 +105,14 @@ export const useBuilderExecutionStore = create<BuilderExecutionState>((set, get)
     set({ phase: 'loading', pendingAction: 'finalize', error: null })
 
     try {
-      const finalizedRun = await finalizeBuilderExecution(run, draft)
+      const result = await getBuilderProvider().finalizeExecution(run, draft)
+      if (!result.ok) {
+        throw new Error(result.failure?.message ?? result.summary)
+      }
       set({
         phase: 'ready',
         pendingAction: null,
-        run: finalizedRun,
+        run: result.data,
         error: null,
       })
     } catch (error) {

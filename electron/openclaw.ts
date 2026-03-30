@@ -381,7 +381,28 @@ export class OpenClawBridge {
   }
 
   async getSkills(): Promise<OpenClawSkill[]> {
-    return []
+    try {
+      const url = new URL(this.config.baseUrl)
+      if (url.hostname === 'localhost') url.hostname = '127.0.0.1'
+      url.pathname = '/v1/skills'
+      const res = await fetch(url.toString(), {
+        headers: this.headers(),
+        signal: AbortSignal.timeout(3000),
+      })
+      if (!res.ok) return []
+      const data = await res.json().catch(() => null)
+      if (!Array.isArray(data)) return []
+      return data
+        .filter((s): s is Record<string, unknown> => Boolean(s) && typeof s === 'object')
+        .map((s) => ({
+          name: typeof s['name'] === 'string' ? s['name'] : '',
+          enabled: Boolean(s['enabled']),
+          description: typeof s['description'] === 'string' ? s['description'] : undefined,
+        }))
+        .filter((s) => s.name.length > 0)
+    } catch {
+      return []
+    }
   }
 
   async startDetachedMessage(

@@ -2,13 +2,17 @@ import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Activity,
+  BookmarkPlus,
   BookOpen,
   Compass,
   FileSearch,
   LayoutGrid,
+  Layers,
   RefreshCw,
+  Save,
   Search,
   ShieldCheck,
+  Sparkles,
   Target,
   Trash2,
   Wrench,
@@ -41,21 +45,29 @@ const AGENT_ICON: Record<AgentPersonaId, typeof Compass> = {
 }
 
 const ACTION_MODE_LABEL: Record<MissionActionMode, string> = {
-  'plan-only':         'Plan only',
-  'execution-request': 'Execution request',
-  'verification':      'Verification',
-  'remediation':       'Remediation',
-  'ops-check':         'Ops check',
-  'research':          'Gather context',
+  'plan-only':          'Plan only',
+  'execution-request':  'Execution request',
+  'verification':       'Verification',
+  'remediation':        'Remediation',
+  'ops-check':          'Ops check',
+  'research':           'Gather context',
+  'concierge-workflow': 'Concierge workflow',
+  'calendar-write':     'Calendar action',
+  'memory-retrieval':   'Memory retrieval',
+  'media-generation':   'Media generation',
 }
 
 const ACTION_MODE_ICON: Record<MissionActionMode, typeof Compass> = {
-  'plan-only':         Compass,
-  'execution-request': Wrench,
-  'verification':      ShieldCheck,
-  'remediation':       FileSearch,
-  'ops-check':         Activity,
-  'research':          Search,
+  'plan-only':          Compass,
+  'execution-request':  Wrench,
+  'verification':       ShieldCheck,
+  'remediation':        FileSearch,
+  'ops-check':          Activity,
+  'research':           Search,
+  'concierge-workflow': Sparkles,
+  'calendar-write':     BookmarkPlus,
+  'memory-retrieval':   Save,
+  'media-generation':   Layers,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -28,6 +28,7 @@
  */
 
 import { useConciergeStore } from '@/store/concierge'
+import { getConciergeProvider } from '@/integrations/registry/providerRegistry'
 import {
   triageInbox,
   markEmailRead,
@@ -100,28 +101,14 @@ export {
  * The orchestrator routes execution based on the actionRef.
  */
 export function approveAction(approvalId: string): void {
-  const store = useConciergeStore.getState()
-  const approval = store.approvalQueue.find((a) => a.id === approvalId)
-  if (!approval || approval.status !== 'pending') return
-
-  store.resolveApproval(approvalId, 'approved')
-  store.logActivity(approval.workerId, `Approved: ${approval.title}`, 'success')
-
-  _executeApprovedAction(approval.actionRef, approval.payload)
+  void getConciergeProvider().approveAction(approvalId)
 }
 
 /**
  * Reject an action — permanently blocks this specific action.
  */
 export function rejectAction(approvalId: string): void {
-  const store = useConciergeStore.getState()
-  const approval = store.approvalQueue.find((a) => a.id === approvalId)
-  if (!approval || approval.status !== 'pending') return
-
-  store.resolveApproval(approvalId, 'rejected')
-  store.logActivity(approval.workerId, `Rejected: ${approval.title}`, 'info')
-
-  _rejectSourceEntity(approval.actionRef)
+  void getConciergeProvider().rejectAction(approvalId)
 }
 
 // ── Action routing (internal) ─────────────────────────────────────────────────
@@ -272,46 +259,16 @@ export async function dispatchDraftReply(
 }
 
 export async function syncInboxFromGmail(): Promise<void> {
-  const messages = await fetchRecentInboxMessages()
-  if (messages.length === 0) return
-  await dispatchInboxTriage(messages)
+  await getConciergeProvider().syncInboxFromGmail()
 }
 
 export async function generateDraftReplyForEmail(emailId: string): Promise<string | null> {
-  const store = useConciergeStore.getState()
-  const email = store.emails.find((item) => item.id === emailId)
-  if (!email) return null
-
-  store.setWorkerStatus('inbox', 'running')
-
-  try {
-    const draft =
-      await dispatchDraftReply({
-        id: email.id,
-        sender: email.sender,
-        subject: email.subject,
-        body: email.body ?? email.preview,
-        category: email.category,
-      })
-
-    const finalDraft = draft ?? email.draftReply ?? buildFallbackDraftReply(email)
-    storeDraftReply(emailId, finalDraft)
-    store.setWorkerStatus('inbox', 'idle')
-    return finalDraft
-  } catch {
-    const fallbackDraft = email.draftReply ?? buildFallbackDraftReply(email)
-    storeDraftReply(emailId, fallbackDraft)
-    store.setWorkerStatus('inbox', 'idle')
-    return fallbackDraft
-  }
+  const result = await getConciergeProvider().generateDraftReplyForEmail(emailId)
+  return result.data ?? null
 }
 
 export function queueDraftReplyForApproval(emailId: string): void {
-  const store = useConciergeStore.getState()
-  const queued = queueDraftReply(emailId)
-  if (!queued) {
-    store.logActivity('inbox', 'Draft queue failed', 'failed', 'No draft reply exists for this email yet.')
-  }
+  void getConciergeProvider().queueDraftReplyForApproval(emailId)
 }
 
 /**
@@ -323,30 +280,7 @@ export async function dispatchOutboundCall(
   mode: 'serious' | 'demo' = 'serious',
   phoneNumber?: string,
 ): Promise<void> {
-  const store = useConciergeStore.getState()
-
-  try {
-    const result = await phoneAgent.generateScript(contact, instruction, mode, today(), phoneNumber)
-
-    if (isAgentError(result)) {
-      // Fall back to basic queue without AI script
-      queueOutboundCall(contact, phoneNumber, instruction, mode)
-      store.logActivity('phone', 'Queued call (no AI script — fallback)', 'info')
-      return
-    }
-
-    // Queue with the full AI-generated call script
-    const callObjective = result.callScript.objectives[0] ?? instruction
-    queueOutboundCall(contact, phoneNumber, instruction, mode, callObjective, result.callScript)
-    store.logActivity(
-      'phone',
-      `Call script generated for ${contact} — queued for approval`,
-      'pending',
-      `Risk: ${result.riskLevel} · Est. ${result.callScript.estimatedDuration}`,
-    )
-  } catch {
-    queueOutboundCall(contact, phoneNumber, instruction, mode)
-  }
+  await getConciergeProvider().dispatchOutboundCall(contact, instruction, mode, phoneNumber)
 }
 
 /**
@@ -357,34 +291,7 @@ export async function dispatchBookingRequest(
   request: string,
   constraints: Record<string, unknown> = {},
 ): Promise<void> {
-  const store = useConciergeStore.getState()
-  const req = createBookingRequest(type, request, type === 'restaurant')
-  const reqId = req.id
-
-  store.logActivity('reservations', `Booking request created — researching ${type} options`, 'info')
-
-  try {
-    const result = await reservationsAgent.research(type, request, constraints, today())
-    const options: BookingOption[] = isAgentError(result)
-      ? generateBookingOptions(reqId)
-      : generateBookingOptions(reqId, result.suggestedOptions)
-
-    if (options.length > 0) {
-      setBookingOptions(reqId, options)
-      store.logActivity(
-        'reservations',
-        `${options.length} options ready for review`,
-        'success',
-        isAgentError(result) ? 'Fallback shortlist generated locally.' : result.notes,
-      )
-    }
-  } catch {
-    const options = generateBookingOptions(reqId)
-    if (options.length > 0) {
-      setBookingOptions(reqId, options)
-      store.logActivity('reservations', `${options.length} fallback options ready for review`, 'info')
-    }
-  }
+  await getConciergeProvider().dispatchBookingRequest(type, request, constraints)
 }
 
 /**
